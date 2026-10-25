@@ -197,3 +197,20 @@ Execute the test suite with pytest:
 python -m pytest -v
 ```
 
+### Task 1 validation guarantees
+
+- Required identifiers and request text reject empty or whitespace-only values.
+  Optional phone/hash values and cleared historical values remain allowed.
+- CSV loading rejects duplicate/blank headers and malformed quoting, preserves
+  physical source line numbers, and excludes duplicate primary IDs from records.
+- Input and intermediate timestamps reject naive values and normalize to UTC.
+  Timestamp formatting preserves fractional seconds and future retention dates
+  remain valid policy metadata.
+- Output rows enforce status, phase, numbering, ordering, and citation rules at
+  construction and again before CSV serialization. Nested list mutation cannot
+  bypass export validation. Step numbers must be actual integers.
+- Regression tests also check that all 32 official sample answers remain compatible
+  with these structural contracts. This is not a prediction-accuracy measurement.
+
+Task 1 performs inspection and contract validation only. It makes no model calls,
+does not generate predictions, and does not modify the supplied dataset.

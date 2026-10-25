@@ -6,6 +6,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from ghost_audit.timestamps import parse_iso_timestamp
+from ghost_audit.models.common import NonBlankStr
 
 
 class ReportedStatus(str, Enum):
@@ -66,13 +67,13 @@ class DeletionRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    case_id: str
-    email: str
+    case_id: NonBlankStr
+    email: NonBlankStr
     requested_at: datetime
     reported_status: ReportedStatus
     reported_at: datetime
     audit_at: datetime
-    request_text: str
+    request_text: NonBlankStr
 
     @field_validator("requested_at", "reported_at", "audit_at", mode="before")
     @classmethod
@@ -85,9 +86,9 @@ class UserIdentity(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    user_id: str
-    name: str
-    email: str
+    user_id: NonBlankStr
+    name: NonBlankStr
+    email: NonBlankStr
     phone: str
     email_hash: str
     updated_at: datetime
@@ -103,10 +104,10 @@ class UserAuditLogEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    audit_id: str
-    user_id: str
+    audit_id: NonBlankStr
+    user_id: NonBlankStr
     event_time: datetime
-    field_name: str
+    field_name: NonBlankStr
     old_value: str
     new_value: str
 
@@ -121,12 +122,12 @@ class SystemActivityEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    activity_id: str
+    activity_id: NonBlankStr
     event_time: datetime
-    event_type: str
-    source_system: str
-    target_system: str
-    resource_id: str
+    event_type: NonBlankStr
+    source_system: NonBlankStr
+    target_system: NonBlankStr
+    resource_id: NonBlankStr
     reported_result: ReportedResult
     details: str
 
@@ -141,9 +142,9 @@ class DeletionRule(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    rule_id: str
+    rule_id: NonBlankStr
     data_category: DataCategory
-    condition: str
+    condition: NonBlankStr
     required_action: RequiredAction
 
 
@@ -152,9 +153,9 @@ class EvidenceManifestEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    file_id: str
-    file_path: str
-    origin: str
+    file_id: NonBlankStr
+    file_path: NonBlankStr
+    origin: NonBlankStr
     captured_at: datetime
 
     @field_validator("captured_at", mode="before")

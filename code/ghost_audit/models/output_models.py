@@ -3,7 +3,9 @@
 from enum import Enum
 import json
 from typing import NamedTuple
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ghost_audit.models.common import NonBlankStr
 
 
 class DeletionStatus(str, Enum):
@@ -131,13 +133,20 @@ class Step(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    step_no: int = Field(ge=1, description="1-indexed consecutive step number")
+    step_no: int = Field(ge=1, strict=True, description="1-indexed consecutive step number")
     phase: StepPhase
-    system_id: str
-    resource_id: str
+    system_id: NonBlankStr
+    resource_id: NonBlankStr
     operation: StepOperation
     state: StepState
     evidence_id: str = ""
+
+    @field_validator("evidence_id")
+    @classmethod
+    def reject_blank_citation(cls, value: str) -> str:
+        if value and not value.strip():
+            raise ValueError("evidence_id must be empty or a nonblank evidence reference.")
+        return value
 
     @model_validator(mode="after")
     def validate_operation_phase_state(self) -> "Step":
@@ -175,9 +184,14 @@ def validate_steps_sequence(status: DeletionStatus, steps: list[Step]) -> list[s
         return errors
 
     # Consecutive numbering starting at 1
+    seen = set()
     for i, step in enumerate(steps, start=1):
         if step.step_no != i:
             errors.append(f"Step at index {i-1} has step_no={step.step_no}, expected {i}.")
+        key = (step.phase, step.operation, step.system_id, step.resource_id)
+        if key in seen:
+            errors.append(f"Duplicate operation for the same resource at step {step.step_no}.")
+        seen.add(key)
 
     # Status-specific phase and citation validation
     if status == DeletionStatus.COMPLETE:
@@ -231,11 +245,18 @@ def validate_steps_sequence(status: DeletionStatus, steps: list[Step]) -> list[s
 class OutputRow(BaseModel):
     """Final output row contract for output.csv."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    case_id: str
+    case_id: NonBlankStr
     deletion_status: DeletionStatus
     steps: list[Step] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def enforce_row_contract(self) -> "OutputRow":
+        errors = self.validate_row()
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
 
     def validate_row(self) -> list[str]:
         """Validate step sequence according to the row's deletion status."""
@@ -243,7 +264,10 @@ class OutputRow(BaseModel):
 
     def steps_json_string(self) -> str:
         """Serialize steps as a valid JSON array."""
-        return json.dumps([s.model_dump() for s in self.steps], separators=(",", ":"))
+        # frozen=True does not freeze list contents. Revalidate a snapshot so a
+        # caller cannot mutate steps after construction and export invalid output.
+        checked = type(self).model_validate(self.model_dump(mode="python"))
+        return json.dumps([s.model_dump(mode="json") for s in checked.steps], separators=(",", ":"))
 
     def to_csv_record(self) -> tuple[str, str, str]:
         """Return tuple of (case_id, deletion_status, steps_json)."""

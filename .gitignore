@@ -32,3 +32,12 @@ build/
 dist/
 *.egg-info/
 code.zip
+
+# Local credentials and generated audit/cache artifacts
+.env
+.env.*
+!.env.example
+.cache/
+/artifacts/
+/output.csv
+*.patch

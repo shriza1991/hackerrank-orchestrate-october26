@@ -61,7 +61,9 @@ def format_iso_timestamp(dt: datetime) -> str:
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         raise ValueError("Cannot format timezone-naive datetime.")
     dt_utc = dt.astimezone(timezone.utc)
-    return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Keep fractional seconds when supplied; dropping them can move an event
+    # from after a cutoff onto the cutoff when the value is round-tripped.
+    return dt_utc.isoformat(timespec="auto").replace("+00:00", "Z")
 
 
 def is_within_audit_cutoff(event_time: datetime, audit_at: datetime) -> bool:

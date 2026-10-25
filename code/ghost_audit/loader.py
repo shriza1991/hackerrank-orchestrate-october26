@@ -1,6 +1,7 @@
 """CSV data loaders and validation engine for ghost_audit."""
 
 import csv
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, TypeVar
@@ -19,6 +20,14 @@ from ghost_audit.models.input_models import (
 )
 
 T = TypeVar("T")
+
+
+class _CsvRow(dict):
+    """Dictionary row carrying its original physical CSV starting line."""
+
+    def __init__(self, values: dict[str, str], row_index: int):
+        super().__init__(values)
+        self.row_index = row_index
 
 
 @dataclass(frozen=True)
@@ -99,7 +108,7 @@ class DataLoader:
         rows: list[dict[str, str]] = []
         try:
             with open(file_path, mode="r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.reader(f)
+                reader = csv.reader(f, strict=True)
                 try:
                     headers = next(reader)
                 except StopIteration:
@@ -110,6 +119,17 @@ class DataLoader:
                             row_index=0,
                             field_name=None,
                             message="Empty CSV file; no header row found.",
+                        )
+                    )
+                    return [], issues
+
+                duplicates = sorted(name for name, count in Counter(headers).items() if count > 1)
+                if duplicates or any(not header.strip() for header in headers):
+                    issues.append(
+                        ValidationIssue(
+                            severity="ERROR", file_name=file_name, row_index=1,
+                            field_name=None,
+                            message=f"Invalid CSV headers: duplicate headers {duplicates} or blank header names.",
                         )
                     )
                     return [], issues
@@ -142,7 +162,12 @@ class DataLoader:
                     )
 
                 expected_len = len(headers)
-                for line_no, raw_row in enumerate(reader, start=2):
+                while True:
+                    line_no = reader.line_num + 1
+                    try:
+                        raw_row = next(reader)
+                    except StopIteration:
+                        break
                     # Skip empty trailing rows
                     if not raw_row:
                         continue
@@ -158,9 +183,17 @@ class DataLoader:
                         )
                         continue
 
-                    row_dict = dict(zip(headers, raw_row))
+                    row_dict = _CsvRow(dict(zip(headers, raw_row)), line_no)
                     rows.append(row_dict)
 
+        except csv.Error as exc:
+            issues.append(
+                ValidationIssue(
+                    severity="ERROR", file_name=file_name,
+                    row_index=reader.line_num, field_name=None,
+                    message=f"Malformed CSV syntax: {exc}",
+                )
+            )
         except Exception as exc:
             issues.append(
                 ValidationIssue(
@@ -187,27 +220,30 @@ class DataLoader:
         seen_ids: set[str] = set()
 
         for idx, row in enumerate(raw_rows, start=2):
+            row_index = getattr(row, "row_index", idx)
             primary_id = row.get(id_field, "").strip()
             if not primary_id:
                 issues.append(
                     ValidationIssue(
                         severity="ERROR",
                         file_name=file_name,
-                        row_index=idx,
+                        row_index=row_index,
                         field_name=id_field,
                         message=f"Missing primary identifier '{id_field}'.",
                     )
                 )
+                continue
             elif primary_id in seen_ids:
                 issues.append(
                     ValidationIssue(
                         severity="ERROR",
                         file_name=file_name,
-                        row_index=idx,
+                        row_index=row_index,
                         field_name=id_field,
                         message=f"Duplicate primary identifier '{id_field}'='{primary_id}'.",
                     )
                 )
+                continue
             else:
                 seen_ids.add(primary_id)
 
@@ -221,7 +257,7 @@ class DataLoader:
                         ValidationIssue(
                             severity="ERROR",
                             file_name=file_name,
-                            row_index=idx,
+                            row_index=row_index,
                             field_name=field_name,
                             message=err["msg"],
                         )
@@ -231,7 +267,7 @@ class DataLoader:
                     ValidationIssue(
                         severity="ERROR",
                         file_name=file_name,
-                        row_index=idx,
+                        row_index=row_index,
                         field_name=None,
                         message=f"Parsing error: {exc}",
                     )
