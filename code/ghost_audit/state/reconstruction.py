@@ -420,9 +420,12 @@ class ResourceStateEngine:
             )
             is_negative_lookup = is_404 or is_not_found
 
+            # Inventory observations describe a bounded collection. They feed
+            # ScopedInventoryChecker separately and must never become a
+            # synthetic ``unspecified_resource`` record merely because the
+            # inventory embeds rows/counts in its facts.
             is_pure_inventory_metadata = (
                 obs.observation_type in {"INVENTORY_SCOPE", "TABLE_INVENTORY"}
-                and "table_rows" not in facts
                 and "resource_id" not in facts
                 and not obs.resource_id
             )

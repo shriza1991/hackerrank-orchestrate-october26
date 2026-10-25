@@ -9,7 +9,7 @@ from ghost_audit.intent.service import IntentClassificationService
 from ghost_audit.llm.config import get_model_settings
 from ghost_audit.llm.errors import GatewayError
 from ghost_audit.llm.gateway import ModelGateway
-from ghost_audit.llm.transport import OpenAIResponsesTransport
+from ghost_audit.llm.transport_factory import create_model_transport
 from ghost_audit.llm.usage import UsageTracker
 from ghost_audit.loader import DataLoader
 
@@ -47,13 +47,18 @@ def run_intent_classification(
         return 0
 
     tracker = UsageTracker()
-    gateway = ModelGateway(get_model_settings(), OpenAIResponsesTransport(), usage=tracker)
+    settings = get_model_settings()
+    gateway = ModelGateway(settings, create_model_transport(settings), usage=tracker)
     try:
         result = IntentClassificationService(gateway).classify_text(
             selected_text or "", case_id=selected_case, run_id="development-intent-cli"
         )
     except (GatewayError, ValueError) as exc:
         print(f"Intent classification failed: {exc}")
+        if write_report:
+            path = REPO_ROOT / "artifacts" / "intent-classification-usage.md"
+            tracker.write_markdown(path)
+            print(f"Development usage report: {path}")
         return 1
     intent, metadata = result.intent, result.metadata
     print(f"Decision: {intent.decision.value}")

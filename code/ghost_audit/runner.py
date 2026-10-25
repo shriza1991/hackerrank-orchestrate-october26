@@ -23,7 +23,7 @@ from ghost_audit.intent.service import IntentClassificationService, request_text
 from ghost_audit.llm.config import get_model_settings
 from ghost_audit.llm.errors import ConfigurationError
 from ghost_audit.llm.gateway import ModelGateway
-from ghost_audit.llm.transport import OpenAIResponsesTransport
+from ghost_audit.llm.transport_factory import create_model_transport
 from ghost_audit.llm.usage import UsageTracker
 from ghost_audit.loader import DataLoader
 from ghost_audit.models.input_models import DeletionRequest
@@ -83,7 +83,7 @@ class AuditPipelineRunner:
             model_settings = get_model_settings()
             gateway = ModelGateway(
                 settings=model_settings,
-                transport=OpenAIResponsesTransport(),
+                transport=create_model_transport(model_settings),
                 usage=self.usage_tracker,
             )
             self.intent_service = IntentClassificationService(gateway=gateway)

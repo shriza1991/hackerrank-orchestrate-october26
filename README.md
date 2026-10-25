@@ -14,30 +14,67 @@ Read [`problem_statement.md`](./problem_statement.md) for the complete challenge
 
 ## Quick Start
 
-Clone the repository and move into the project directory:
+Tested Windows PowerShell setup from the extracted submission directory:
 
-```bash
-git clone https://github.com/interviewstreet/hackerrank-orchestrate-october26.git
-cd hackerrank-orchestrate-october26
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python code\main.py inspect --dataset .\dataset --json
+python -m pytest -q --ignore=tests/test_multimodal_ingestion.py
 ```
 
-Start your AI coding tool from the **repository root** so it automatically reads [`AGENTS.md`](./AGENTS.md) and logs your session turns to `log.txt` in the root directory.
+Place the supplied `dataset` directory at `.\dataset`, or pass its location with
+`--dataset`. Native-text PDF extraction requires PyMuPDF, which is included in
+`requirements.txt`. Image OCR is optional and is not part of the verified safe
+run because the RapidOCR backend's outbound telemetry connection remains
+blocked for approval.
 
-Build your solution in `code/main.py`, or use another language and document its setup and run command clearly in your README.
+For a genuine run, configure environment variables without committing values:
 
-Your solution must:
-
-- Read the input files from `dataset/`
-- Generate one prediction row for every request in `dataset/deletion_requests.csv`
-- Write the final predictions to `output.csv` in the repository root
-
-Run the starter Python entry point with:
-
-```bash
-python3 code/main.py
+```powershell
+$env:GHOST_AUDIT_API_KEY = '<provider key>' # OPENAI_API_KEY is also accepted
+$env:GHOST_AUDIT_MODEL = '<exact Responses API model id>'
+$env:GHOST_AUDIT_INPUT_PRICE_PER_MILLION = '<optional decimal>'
+$env:GHOST_AUDIT_OUTPUT_PRICE_PER_MILLION = '<optional decimal>'
+python code\main.py model-smoke
 ```
 
-The blank template at `dataset/output.csv` is provided as a reference. Your final generated file for submission must be the root-level `output.csv`.
+For Gemini, install the included `google-genai` dependency and use the official
+SDK transport rather than an OpenAI-compatible endpoint:
+
+```powershell
+$env:GHOST_AUDIT_PROVIDER = 'gemini'
+$env:GEMINI_API_KEY = '<Gemini API key>'
+$env:GHOST_AUDIT_MODEL = '<exact Gemini model id>'
+python code\main.py classify-intent --text 'Please delete my account.' --live --report
+```
+
+Run the 32 public requests with live intent classification:
+
+```powershell
+python code\main.py run-audit --sample --mode structured --live --output artifacts\sample-predictions.csv --usage-report artifacts\sample-usage.json --json
+python code\evaluation\main.py --predictions artifacts\sample-predictions.csv --reference dataset\sample_output.csv --requests dataset\sample_deletion_requests.csv --json
+```
+
+Alternatively, provide a strict versioned cache using `--intent-cache
+<path.json>`. Cache entries are bound to the current request-text SHA-256,
+prompt version, provider/model provenance, and a supporting quote contained in
+the request text; malformed or stale caches fail closed.
+
+The final command is allowed to replace root `output.csv` only when every one
+of the 518 cases resolves without diagnostic bypass and passes exact ID,
+ordering, schema, citation, and step validation:
+
+```powershell
+python code\main.py run-audit --mode structured --live --output .\output.csv --usage-report artifacts\final-usage.json --json
+```
+
+Use `--mode all` only after the OCR dependency/approval issue is resolved.
+Diagnostic inspection uses `--diagnostic`, can write only clearly named files
+under `artifacts\`, and can never replace root `output.csv`. The blank template
+at `dataset\output.csv` is not a prediction file.
 
 
 ## Dataset
@@ -515,4 +552,3 @@ python code/main.py ingest-evidence --artifacts-dir artifacts/
 CLI Exit Codes:
 - `0`: Ingestion completed successfully (79 files parsed/partial, 15 files deferred, 0 failed).
 - `1`: Ingestion failed (file missing, malformed required input, or unsafe directive).
-

@@ -1382,3 +1382,34 @@ repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=none
 
+## [2026-10-25T18:31:44.9978259+05:30] Final rescue run, reports, package, and interview notes
+
+User Prompt (verbatim, secrets redacted):
+# Files pasted by the user:
+
+## "Final task: rescue the runnable submission, perform the real run where possible…": C:\Users\dyara\.codex/attachments/3d164275-8eb0-43d4-9511-4111a418d920/pasted-text.txt
+
+Pasted text contains the user's request.
+
+## My request:
+
+Agent Response Summary:
+Attempted genuine 32-case intent inference with the configured credential and an official Responses API model, but all 32 provider calls failed before returning classifications or token usage, so no final predictions were fabricated. Fixed resource-less inventory observations that created false unspecified-resource conflicts, reducing the full structured diagnostic from 440 to 434 unresolved while retaining 292 passing safe tests. Updated the required evaluation and usage reports, Windows README, dependencies, and interview notes, then built and clean-extracted code.zip with no forbidden files; root output.csv remains absent and submission is not prediction-ready.
+
+Actions:
+* Ran offline model configuration inspection and a bounded genuine 32-case sample attempt; recorded 32 failed attempts, zero successful calls, unknown tokens, and unavailable cost.
+* Modified code/ghost_audit/state/reconstruction.py to keep resource-less inventories as scoped proof rather than synthetic records.
+* Updated README.md, requirements.txt, code/evaluation/evaluation_report.md, and created code/evaluation/usage_report.md and INTERVIEW_NOTES.md.
+* Ran the 292-test safe non-OCR suite and final sample/full structured diagnostics (28/32 and 434/518 unresolved).
+* Built code.zip from a clean staging directory including README, code, tests, requirements, pyproject, reports, and interview notes.
+* Verified the archive has 102 entries, no dataset/cache/artifact/credential/nested-archive entries, imports successfully, exposes CLI help, validates dataset-path override, and contains both reports.
+* Did not retry the blocked OCR backend, create output.csv, submit, commit, or push.
+
+Context:
+tool=Codex Desktop
+model=gpt-5
+branch=main
+repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+

@@ -100,7 +100,10 @@ class ModelSettings:
     def require_live(self) -> None:
         missing = []
         if not self.api_key or not self.api_key.strip():
-            missing.append("GHOST_AUDIT_API_KEY or OPENAI_API_KEY")
+            if self.provider.strip().lower() == "gemini":
+                missing.append("GHOST_AUDIT_API_KEY or GEMINI_API_KEY")
+            else:
+                missing.append("GHOST_AUDIT_API_KEY or OPENAI_API_KEY")
         if not self.model or not self.model.strip():
             missing.append("GHOST_AUDIT_MODEL")
         if missing:
@@ -109,13 +112,20 @@ class ModelSettings:
 
 def get_model_settings(environ: Mapping[str, str] | None = None) -> ModelSettings:
     env = os.environ if environ is None else environ
+    provider = env.get("GHOST_AUDIT_PROVIDER", "openai").strip().lower()
     attempts = _int(env, "GHOST_AUDIT_MAX_ATTEMPTS", 3)
     max_tokens = _int(env, "GHOST_AUDIT_MAX_OUTPUT_TOKENS", None)
     return ModelSettings(
-        api_key=env.get("GHOST_AUDIT_API_KEY") or env.get("OPENAI_API_KEY"),
+        api_key=(
+            env.get("GHOST_AUDIT_API_KEY")
+            or (env.get("GEMINI_API_KEY") if provider == "gemini" else env.get("OPENAI_API_KEY"))
+        ),
         model=env.get("GHOST_AUDIT_MODEL"),
-        api_base_url=env.get("GHOST_AUDIT_API_BASE_URL", "https://api.openai.com/v1"),
-        provider=env.get("GHOST_AUDIT_PROVIDER", "openai"),
+        api_base_url=env.get("GHOST_AUDIT_API_BASE_URL") or (
+            "https://generativelanguage.googleapis.com" if provider == "gemini"
+            else "https://api.openai.com/v1"
+        ),
+        provider=provider,
         request_timeout=_float(env, "GHOST_AUDIT_REQUEST_TIMEOUT", 30.0),
         max_attempts=attempts if attempts is not None else 3,
         initial_backoff=_float(env, "GHOST_AUDIT_INITIAL_BACKOFF", 0.5),

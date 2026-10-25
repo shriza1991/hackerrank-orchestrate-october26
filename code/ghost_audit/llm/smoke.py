@@ -10,7 +10,7 @@ from ghost_audit.config import REPO_ROOT
 from ghost_audit.llm.config import get_model_settings
 from ghost_audit.llm.errors import GatewayError
 from ghost_audit.llm.gateway import ModelGateway
-from ghost_audit.llm.transport import OpenAIResponsesTransport
+from ghost_audit.llm.transport_factory import create_model_transport
 from ghost_audit.llm.types import Message, ModelRequest
 from ghost_audit.llm.usage import UsageTracker
 
@@ -31,7 +31,7 @@ def run_smoke(*, live: bool, write_report: bool = False) -> int:
         print("Use --live to authorize a potentially paid synthetic request.")
         return 0
     tracker = UsageTracker()
-    gateway = ModelGateway(settings, OpenAIResponsesTransport(), usage=tracker)
+    gateway = ModelGateway(settings, create_model_transport(settings), usage=tracker)
     request = ModelRequest(
         task_name="synthetic_smoke",
         template_version="1",
