@@ -155,3 +155,45 @@ Before submitting, confirm that:
 - `code.zip` includes your runnable code, `README.md`, `code/evaluation/evaluation_report.md`, and `code/evaluation/usage_report.md`;
 - `log.txt` follows the `AGENTS.md` turn format and is uploaded to the `chat_transcript` slot; and
 - no API keys, credentials, real personal data, or sensitive configuration values are included.
+
+---
+
+## Foundation and Setup (Task 1)
+
+### Requirements
+
+- Python 3.11 or newer
+- Dependencies: `pydantic>=2.0.0`, `pytest>=8.0.0`
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Dataset Inspection CLI
+
+To validate and inspect all participant-facing files and verify against the expected challenge dataset counts:
+
+```bash
+# Inspect the 518 evaluation requests and dataset files
+python code/main.py inspect
+
+# Inspect the 32 sample requests
+python code/main.py inspect --sample
+
+# Output machine-readable JSON summary
+python code/main.py inspect --json
+
+# Override dataset location
+python code/main.py inspect --dataset path/to/dataset
+```
+
+### Running Tests
+
+Execute the test suite with pytest:
+
+```bash
+python -m pytest -v
+```
+
