@@ -37,6 +37,37 @@ class UsageTracker:
             values.append(item)
         return values
 
+    @staticmethod
+    def _json_safe(value):
+        """Losslessly encode Decimal values while preserving unknowns as null."""
+
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: UsageTracker._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [UsageTracker._json_safe(item) for item in value]
+        return value
+
+    def report_payload(self, *, run_provenance: dict | None = None) -> dict:
+        """Return a persistent report containing aggregates and every attempt."""
+
+        return {
+            "schema_version": 1,
+            "run_provenance": self._json_safe(run_provenance or {}),
+            "summary": self._json_safe(self.summary()),
+            "attempts": self.machine_records(),
+        }
+
+    def write_json(self, path: Path, *, run_provenance: dict | None = None) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.report_payload(run_provenance=run_provenance), indent=2),
+            encoding="utf-8",
+            newline="\n",
+        )
+
     def summary(self) -> dict:
         groups: dict[tuple[str, str], list[UsageRecord]] = defaultdict(list)
         for record in self.records:

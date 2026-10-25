@@ -49,7 +49,8 @@ def derive_copy_type(
 
     # Extract explicit topology
     topo = str(scope_ctx.get("topology") or scope_ctx.get("table_topology") or facts_dict.get("topology") or "").lower()
-    combined = f"{sys_lower} {loc_lower} {topo}"
+    has_service_scope = bool(scope_ctx.get("service") or scope_ctx.get("data_store"))
+    combined = f"{sys_lower} {' ' if has_service_scope else loc_lower} {topo}"
 
     if "read_replica" in combined:
         copy_type = CopyType.READ_REPLICA
@@ -76,6 +77,15 @@ def derive_copy_type(
 
     # Physical store name: remove row/page qualifiers (e.g. table:customer_data_primary:row:1 -> customer_data_primary)
     store_name = facts_dict.get("table_name")
+    if not store_name:
+        # JSON exports often describe the physical service/store in scope while
+        # source_locator points only to a row. Preserve store identity across
+        # snapshots instead of treating every JSON path as a distinct copy.
+        store_name = scope_ctx.get("data_store") or scope_ctx.get("service")
+    if not store_name and ("line_no" in scope_ctx or "trace_id" in scope_ctx):
+        store_name = system_id
+    if sys_lower == "security_service" and str(store_name).lower() == "security_audit_records":
+        store_name = system_id
     if not store_name and source_locator:
         s = source_locator
         s = re.sub(r':row:\d+.*$', '', s)
@@ -315,6 +325,11 @@ def extract_process_and_restore_state(facts: dict[str, Any]) -> tuple[ProcessSta
     rest_state = RestoreState.NOT_APPLICABLE
 
     # Process settings
+    if facts.get("enabled") is True or facts.get("scheduler_registered") is True:
+        proc_state = ProcessState.ENABLED
+    elif facts.get("enabled") is False:
+        proc_state = ProcessState.DISABLED
+
     for key in ["connector_status", "sync_status", "process_state", "data_flow_state", "state"]:
         if key in facts and facts[key] is not None:
             v_str = str(facts[key]).strip()
@@ -414,6 +429,12 @@ class ResourceStateEngine:
             if is_pure_inventory_metadata:
                 continue
 
+            # Trace starts, workflow messages, and raw fragments are not
+            # observations that a stored record exists. Their correlated
+            # lookup/config result is processed separately below.
+            if obs.observation_type in {"OPERATIONAL_CLAIM", "RAW_FRAGMENT"}:
+                continue
+
             sys_id = obs.system_id or "unknown"
             r_id = obs.resource_id or (
                 facts.get("resource_id") or "unspecified_resource"
@@ -428,10 +449,45 @@ class ResourceStateEngine:
             )
             copy_str = str(copy_key)
             canon_key = f"{sys_id}:{r_id}"
-            resource_copies_map.setdefault(canon_key, []).append(copy_str)
 
             fields = extract_field_observations(facts) if not is_negative_lookup else {}
             proc_st, rest_st = extract_process_and_restore_state(facts)
+
+            # Process configurations are operational objects, not stored data
+            # records subject to one of the 15 record categories.
+            if obs.observation_type == "PROCESS_CONFIG":
+                if proc_st in {ProcessState.ENABLED, ProcessState.DISABLED}:
+                    process_observations.append(
+                        ProcessObservation(
+                            process_id=facts.get("process_id") or facts.get("connector_id") or r_id,
+                            system_id=sys_id,
+                            target_resource=facts.get("target_resource_id") or facts.get("target_resource"),
+                            target_copy=copy_str,
+                            process_type=facts.get("process_type") or "DATA_FLOW",
+                            state=proc_st,
+                            is_claim=False,
+                            evidence_id=obs.evidence_id,
+                            timestamp=ts_info.state_observation_time,
+                            details=str(facts.get("details") or facts.get("message") or ""),
+                        )
+                    )
+                if rest_st in {RestoreState.ALLOWED, RestoreState.BLOCKED}:
+                    restore_observations.append(
+                        RestoreObservation(
+                            backup_id=facts.get("backup_id") or r_id,
+                            system_id=sys_id,
+                            target_resource=facts.get("target_resource_id") or facts.get("target_resource"),
+                            target_copy=copy_str,
+                            restore_state=rest_st,
+                            is_claim=False,
+                            evidence_id=obs.evidence_id,
+                            timestamp=ts_info.state_observation_time,
+                            details=str(facts.get("details") or facts.get("message") or ""),
+                        )
+                    )
+                continue
+
+            resource_copies_map.setdefault(canon_key, []).append(copy_str)
 
             # Determine attribution
             has_matching_ident = any(
@@ -565,6 +621,22 @@ class ResourceStateEngine:
             elif act_event.event_type in {"RESTORE", "SYNC", "STREAM_SYNC"}:
                 active_processes.append(f"{act_event.activity_id}:{act_event.event_type}")
 
+            if act_event.event_type == "CHECK_DATA_FLOW":
+                process_observations.append(
+                    ProcessObservation(
+                        process_id=act_event.resource_id,
+                        system_id=sys_id,
+                        target_resource=None,
+                        process_type="DATA_FLOW",
+                        state=ProcessState.UNKNOWN,
+                        is_claim=True,
+                        claim_result=act_event.reported_result,
+                        evidence_id=act_event.activity_id,
+                        timestamp=act_event.event_time,
+                        details=act_event.details,
+                    )
+                )
+
             if act_event.event_type == "BLOCK_RESTORE":
                 if act_event.reported_result == "SUCCESS":
                     restore_risks.append(f"{act_event.activity_id}:CLAIMED_BLOCKED")
@@ -582,11 +654,21 @@ class ResourceStateEngine:
                     )
                 )
 
+            operational_event = act_event.event_type in {
+                "CHECK_DATA_FLOW", "DISABLE_DATA_FLOW", "SYNC", "STREAM_SYNC", "RESTORE", "BLOCK_RESTORE",
+            }
+
             # Attach claim to copy assessments
             relevant_copies = resource_copies_map.get(canon_key, [])
             if not relevant_copies:
-                # Synthesize copy key for activity target
-                c_key = CopyKey(system_id=sys_id, resource_id=r_id, copy_type=CopyType.PRIMARY)
+                # Keep operational-only targets visible for process-state
+                # reconstruction, but distinguish them from stored records so
+                # policy evaluation never turns them into deletion targets.
+                c_key = CopyKey(
+                    system_id=sys_id,
+                    resource_id=r_id,
+                    copy_type=CopyType.SYSTEM_PROCESS if operational_event else CopyType.PRIMARY,
+                )
                 c_str = str(c_key)
                 resource_copies_map.setdefault(canon_key, []).append(c_str)
                 copy_assessments[c_str] = CopyStateAssessment(
@@ -606,6 +688,9 @@ class ResourceStateEngine:
                     assessment.unverified_claims.append(f"{act_event.event_type} {act_event.reported_result}")
                     if assessment.last_activity_time is None or act_event.event_time >= assessment.last_activity_time:
                         assessment.last_activity_time = act_event.event_time
+
+            if operational_event:
+                continue
 
         # 2. Absence verification using scoped inventories and negative lookups
         for canon_key, copy_strs in list(resource_copies_map.items()):

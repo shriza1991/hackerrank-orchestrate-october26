@@ -22,17 +22,16 @@ from ghost_audit.retrieval.models import CaseEvidencePacket
 from ghost_audit.state.models import CaseStateReconstruction, ExistenceState
 
 
-def extract_participant_evidence_id(raw_id: str) -> str:
-    """Extract participant-visible evidence ID (e.g. evidence_54, act_123, or audit ID)."""
+def extract_participant_evidence_id(raw_id: str, allowed_ids: set[str] | None = None) -> str:
+    """Validate one exact participant-visible file, activity, or audit ID."""
     if not raw_id:
         return ""
-    m = re.search(r"\b(evidence_\d+)\b", raw_id)
-    if m:
-        return m.group(1)
-    m_act = re.search(r"\b(act_\w+|\d+)\b", raw_id)
-    if m_act:
-        return m_act.group(1)
-    return raw_id.strip()
+    candidate = raw_id.strip()
+    if not re.fullmatch(r"(?:evidence|activity|audit)_\d+", candidate):
+        return ""
+    if allowed_ids is not None and candidate not in allowed_ids:
+        return ""
+    return candidate
 
 
 class AuditPlanGenerator:
@@ -83,6 +82,15 @@ class AuditPlanGenerator:
 
         # 3. COMPLETE Cases: Only evidence-backed VERIFICATION steps
         if assessment.overall_compliance == PolicyComplianceOutcome.SATISFIED:
+            if recon.diagnostics and recon.diagnostics.coverage_scope != "KNOWN_COMPLETE":
+                return CasePlan(
+                    case_id=case_id,
+                    status=DeletionStatus.INCOMPLETE,
+                    is_unresolved=True,
+                    unresolved_reasons=[
+                        f"Relevant evidence coverage is {recon.diagnostics.coverage_scope}; COMPLETE is not proven."
+                    ],
+                )
             planned_steps: list[PlannedStep] = []
 
             # Require at least one verified resource
@@ -143,6 +151,10 @@ class AuditPlanGenerator:
                         operation=op,
                         state=st,
                         evidence_id=ev_id,
+                        supporting_evidence_ids=self._valid_evidence_ids(
+                            [ref for copy in res.copies.values() for ref in copy.evidence_references],
+                            packet,
+                        ),
                         reason=f"Verified compliant state for {canon_key} backed by {ev_id}",
                     )
                 )
@@ -174,6 +186,17 @@ class AuditPlanGenerator:
         verifications: list[PlannedStep] = []
         dep_graph: dict[str, list[str]] = {}
 
+        # A demonstrated violation proves incompleteness, but unresolved
+        # relevant resources mean no emitted remediation list can honestly be
+        # presented as exhaustive.
+        if assessment.unresolved_summary:
+            return CasePlan(
+                case_id=case_id,
+                status=DeletionStatus.INCOMPLETE,
+                is_unresolved=True,
+                unresolved_reasons=list(assessment.unresolved_summary),
+            )
+
         # 4A. Active data flows
         for pr in assessment.process_risks:
             if pr.is_active:
@@ -195,6 +218,7 @@ class AuditPlanGenerator:
                         operation=StepOperation.REPORT_ACTIVE_DATA_FLOW,
                         state=StepState.ACTIVE,
                         evidence_id=ev_id,
+                        supporting_evidence_ids=self._valid_evidence_ids(pr.supporting_evidence, packet),
                         reason=pr.details,
                     )
                 )
@@ -243,6 +267,7 @@ class AuditPlanGenerator:
                         operation=StepOperation.REPORT_RESTORE_RISK,
                         state=StepState.ACTIVE,
                         evidence_id=ev_id,
+                        supporting_evidence_ids=self._valid_evidence_ids(rr.supporting_evidence, packet),
                         reason=rr.details,
                     )
                 )
@@ -277,6 +302,23 @@ class AuditPlanGenerator:
             req_act = res.required_action
 
             if res.outcome == PolicyComplianceOutcome.VIOLATED:
+                if req_act == RequiredAction.RETAIN:
+                    return CasePlan(
+                        case_id=case_id,
+                        status=DeletionStatus.INCOMPLETE,
+                        is_unresolved=True,
+                        unresolved_reasons=[
+                            f"Policy-required retained record {canon_key} is missing or invalid; "
+                            "the submission vocabulary has no grounded repair operation."
+                        ],
+                    )
+                if req_act not in {RequiredAction.DELETE, RequiredAction.REDACT, RequiredAction.ANONYMIZE}:
+                    return CasePlan(
+                        case_id=case_id,
+                        status=DeletionStatus.INCOMPLETE,
+                        is_unresolved=True,
+                        unresolved_reasons=[f"Unknown required action for violated resource {canon_key}."],
+                    )
                 ev_id = self._find_resource_evidence(
                     canon_key=canon_key,
                     res=res,
@@ -311,6 +353,7 @@ class AuditPlanGenerator:
                         operation=find_op,
                         state=StepState.PRESENT,
                         evidence_id=ev_id,
+                        supporting_evidence_ids=self._resource_evidence_ids(res, packet),
                         reason=f"Policy violation on {canon_key}",
                     )
                 )
@@ -322,7 +365,7 @@ class AuditPlanGenerator:
                 elif req_act == RequiredAction.ANONYMIZE:
                     rem_op = StepOperation.ANONYMIZE_RECORD
                     rem_st = StepState.ANONYMIZED
-                else:
+                elif req_act == RequiredAction.DELETE:
                     rem_op = StepOperation.DELETE_RECORD
                     rem_st = StepState.ABSENT
 
@@ -363,6 +406,45 @@ class AuditPlanGenerator:
                     evidence_id="",
                     reason=f"Verify required state {v_st.value} for {canon_key}",
                 )
+            )
+
+        # Populate a grounded execution graph. Presentation remains canonical
+        # and independent of this graph.
+        control_steps: list[tuple[PlannedStep, str | None]] = []
+        for risk, step in zip(
+            [risk for risk in assessment.process_risks if risk.is_active],
+            [step for step in remediations if step.operation == StepOperation.DISABLE_DATA_FLOW],
+        ):
+            control_steps.append((step, risk.target_resource))
+        for risk, step in zip(
+            [risk for risk in assessment.restore_risks if not risk.is_blocked],
+            [step for step in remediations if step.operation == StepOperation.BLOCK_RESTORE],
+        ):
+            control_steps.append((step, risk.target_resource))
+
+        updated_remediations: list[PlannedStep] = []
+        for step in remediations:
+            node = self._step_id(step)
+            dependencies: list[str] = []
+            if step.operation in {
+                StepOperation.DELETE_RECORD, StepOperation.REDACT_RECORD, StepOperation.ANONYMIZE_RECORD,
+            }:
+                for control, target in control_steps:
+                    if target and target in {step.resource_id, f"{step.system_id}:{step.resource_id}"}:
+                        dependencies.append(self._step_id(control))
+            dependencies = sorted(set(dependencies))
+            dep_graph[node] = dependencies
+            updated_remediations.append(step.model_copy(update={"depends_on": dependencies}))
+        remediations = updated_remediations
+
+        if self._graph_has_cycle(dep_graph):
+            return CasePlan(
+                case_id=case_id,
+                status=DeletionStatus.INCOMPLETE,
+                internal_steps=findings + remediations + verifications,
+                execution_graph=dep_graph,
+                is_unresolved=True,
+                unresolved_reasons=["Grounded remediation dependency graph contains a cycle."],
             )
 
         all_planned = findings + remediations + verifications
@@ -453,58 +535,31 @@ class AuditPlanGenerator:
                 and (sac.resource_id == res.resource_id or not sac.resource_id)
                 and sac.membership_result == "ABSENT"
             ]
+            relevant_sacs = [sac for sac in relevant_sacs if sac.timestamp <= recon.audit_at]
             sorted_sacs = sorted(relevant_sacs, key=lambda s: s.timestamp, reverse=True)
             if sorted_sacs:
-                ev = extract_participant_evidence_id(sorted_sacs[0].source_id)
+                ev = extract_participant_evidence_id(
+                    sorted_sacs[0].source_id, self._participant_ids(packet)
+                )
                 if ev:
                     return ev
+            return ""
 
-        # 2. Check copy assessments on resource
-        for copy_ast in res.copies.values():
+        # Select proof from the relevant violated/satisfied physical copy, not
+        # an arbitrary first reference on the aggregate resource.
+        desired = (
+            PolicyComplianceOutcome.VIOLATED
+            if res.outcome == PolicyComplianceOutcome.VIOLATED
+            else PolicyComplianceOutcome.SATISFIED
+        )
+        for copy_ast in sorted(res.copies.values(), key=lambda copy: copy.copy_key):
+            if copy_ast.outcome != desired:
+                continue
             if copy_ast.evidence_references:
                 for ref in copy_ast.evidence_references:
-                    ev = extract_participant_evidence_id(ref)
+                    ev = extract_participant_evidence_id(ref, self._participant_ids(packet))
                     if ev:
                         return ev
-
-        # 3. Check state reconstruction copies timeline and observations
-        if canon_key in recon.resources:
-            recon_res = recon.resources[canon_key]
-            for copy_state in recon_res.copies.values():
-                for obs_id in copy_state.supporting_observations:
-                    ev = extract_participant_evidence_id(obs_id)
-                    if ev:
-                        return ev
-                for ev_event in copy_state.timeline:
-                    if not ev_event.is_claim and ev_event.source_id:
-                        ev = extract_participant_evidence_id(ev_event.source_id)
-                        if ev:
-                            return ev
-
-        # 4. Check selected observations in packet
-        if packet and packet.selected_observations:
-            matching_obs = [
-                so for so in packet.selected_observations
-                if so.observation.system_id == res.system_id
-                and (so.observation.resource_id == res.resource_id or not so.observation.resource_id)
-            ]
-            sorted_obs = sorted(matching_obs, key=lambda so: so.observation.capture_time, reverse=True)
-            if sorted_obs:
-                ev = extract_participant_evidence_id(sorted_obs[0].observation.evidence_id)
-                if ev:
-                    return ev
-
-        # 5. Check selected activities in packet
-        if packet and packet.selected_activities:
-            matching_acts = [
-                sa for sa in packet.selected_activities
-                if sa.target_system == res.system_id
-                and sa.resource_id == res.resource_id
-            ]
-            if matching_acts:
-                ev = extract_participant_evidence_id(matching_acts[0].activity_id)
-                if ev:
-                    return ev
 
         return ""
 
@@ -516,21 +571,60 @@ class AuditPlanGenerator:
         packet: Optional[CaseEvidencePacket],
     ) -> str:
         """Find participant-visible evidence ID proving an active process or restore risk."""
+        allowed = self._participant_ids(packet)
         for ref in supporting_evidence:
-            ev = extract_participant_evidence_id(ref)
+            ev = extract_participant_evidence_id(ref, allowed)
             if ev:
                 return ev
-        if packet and packet.selected_observations:
-            for so in packet.selected_observations:
-                if so.observation.system_id == system_id and (so.observation.resource_id == resource_id or not so.observation.resource_id):
-                    ev = extract_participant_evidence_id(so.observation.evidence_id)
-                    if ev:
-                        return ev
-        if packet and packet.selected_activities:
-            for sa in packet.selected_activities:
-                if sa.target_system == system_id and sa.resource_id == resource_id:
-                    ev = extract_participant_evidence_id(sa.activity_id)
-                    if ev:
-                        return ev
         return ""
 
+    @staticmethod
+    def _participant_ids(packet: Optional[CaseEvidencePacket]) -> set[str] | None:
+        if packet is None:
+            return None
+        ids = {so.observation.evidence_id for so in packet.selected_observations}
+        ids.update(sa.activity_id for sa in packet.selected_activities)
+        ids.update(inventory.source_id for inventory in packet.scoped_inventories)
+        ids.update(link.provenance.source_id for link in packet.linking_graph)
+        return {value for value in ids if extract_participant_evidence_id(value)}
+
+    def _valid_evidence_ids(
+        self, values: list[str] | tuple[str, ...], packet: Optional[CaseEvidencePacket]
+    ) -> list[str]:
+        allowed = self._participant_ids(packet)
+        return list(dict.fromkeys(
+            evidence_id for value in values
+            if (evidence_id := extract_participant_evidence_id(value, allowed))
+        ))
+
+    def _resource_evidence_ids(self, res, packet: Optional[CaseEvidencePacket]) -> list[str]:
+        values = [
+            ref
+            for copy in res.copies.values()
+            if copy.outcome == PolicyComplianceOutcome.VIOLATED
+            for ref in copy.evidence_references
+        ]
+        return self._valid_evidence_ids(values, packet)
+
+    @staticmethod
+    def _step_id(step: PlannedStep) -> str:
+        return f"{step.operation.value}:{step.system_id}:{step.resource_id}"
+
+    @staticmethod
+    def _graph_has_cycle(graph: dict[str, list[str]]) -> bool:
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(node: str) -> bool:
+            if node in visiting:
+                return True
+            if node in visited:
+                return False
+            visiting.add(node)
+            if any(visit(dep) for dep in graph.get(node, []) if dep in graph):
+                return True
+            visiting.remove(node)
+            visited.add(node)
+            return False
+
+        return any(visit(node) for node in graph)

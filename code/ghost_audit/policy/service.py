@@ -18,7 +18,7 @@ from ghost_audit.policy.models import (
 )
 from ghost_audit.policy.rules import PolicyRuleCatalog
 from ghost_audit.retrieval.models import CaseEvidencePacket
-from ghost_audit.state.models import CaseStateReconstruction, ExistenceState, ProcessState, RestoreState
+from ghost_audit.state.models import CaseStateReconstruction, CopyType, ExistenceState, ProcessState, RestoreState
 
 
 class PolicyDecisionEngine:
@@ -76,7 +76,17 @@ class PolicyDecisionEngine:
 
         # 1. Evaluate each reconstructed resource
         evaluated_resources: dict[str, ResourcePolicyAssessment] = {}
+        operational_resource_keys: list[str] = []
         for canon_key, res_agg in sorted(recon.resources.items()):
+            if (
+                res_agg.copies
+                and all(copy.copy_key.copy_type == CopyType.SYSTEM_PROCESS for copy in res_agg.copies.values())
+            ) or (
+                res_agg.system_id == "integration_service"
+                and res_agg.resource_id.startswith("data_flow_")
+            ):
+                operational_resource_keys.append(canon_key)
+                continue
             # Inspect first copy facts/timeline to aid category classification
             first_copy = next(iter(res_agg.copies.values())) if res_agg.copies else None
             facts = {}
@@ -106,6 +116,7 @@ class PolicyDecisionEngine:
 
         # 2. Assess process risks
         process_risks: list[ProcessRiskAssessment] = []
+        unresolved_processes: list[str] = []
         if recon.process_observations:
             for pobs in recon.process_observations:
                 if pobs.is_claim:
@@ -127,6 +138,10 @@ class PolicyDecisionEngine:
                                     supporting_evidence=[pobs.evidence_id] if pobs.evidence_id else [],
                                 )
                             )
+                    elif pobs.state == ProcessState.UNKNOWN:
+                        unresolved_processes.append(
+                            f"Process {pobs.process_id} state is supported only by an unverified operational claim."
+                        )
                 else:
                     if pobs.state == ProcessState.ENABLED:
                         process_risks.append(
@@ -251,6 +266,12 @@ class PolicyDecisionEngine:
         for rr in restore_risks:
             if not rr.is_blocked:
                 violations.append(f"Unblocked restore risk {rr.backup_id} ({rr.risk_type})")
+
+        unresolved.extend(unresolved_processes)
+        for canon_key in operational_resource_keys:
+            process_id = canon_key.split(":", 1)[1]
+            if not any(p.process_id == process_id for p in recon.process_observations):
+                unresolved.append(f"Process {process_id} has no grounded current operational state.")
 
         coverage_limitations = (
             list(recon.diagnostics.deferred_files) + list(recon.diagnostics.unreadable_or_failed_files)

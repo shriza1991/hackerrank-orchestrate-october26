@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from ghost_audit.intent.models import (
     IntentClassificationResult,
     IntentModelOutput,
@@ -16,6 +18,12 @@ from ghost_audit.models.input_models import DeletionRequest
 
 class IntentContextValidationError(GatewayError):
     """The response is schema-valid but not grounded in its request text."""
+
+
+def request_text_digest(request_text: str) -> str:
+    """Return the stable digest used to bind cached intent to its source text."""
+
+    return hashlib.sha256(request_text.encode("utf-8")).hexdigest()
 
 
 class IntentClassificationService:

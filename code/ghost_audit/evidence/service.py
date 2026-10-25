@@ -90,8 +90,9 @@ class EvidenceIngestionService:
             captured_at = parse_iso_timestamp(captured_at)
 
         # Mode-based deferral handling
-        is_multimodal = ext in {".pdf", ".png", ".jpg", ".jpeg"}
-        if mode == "structured" and is_multimodal:
+        is_image = ext in {".png", ".jpg", ".jpeg"}
+        is_multimodal = ext == ".pdf" or is_image
+        if mode == "structured" and is_image:
             try:
                 raw_bytes = resolved_path.read_bytes()
                 digest = compute_content_digest(raw_bytes)
@@ -109,7 +110,7 @@ class EvidenceIngestionService:
                 parser_version="1.0.0",
                 observation_count=0,
                 observations=[],
-                warnings=[f"Multimodal evidence ({ext}) deferred to Task 7 under mode='structured'."],
+                warnings=[f"OCR-dependent image evidence ({ext}) deferred under mode='structured'."],
                 errors=[],
                 unparsed_fragments=[],
                 content_digest=digest,
@@ -148,6 +149,7 @@ class EvidenceIngestionService:
                 origin=entry.origin,
                 manifest_captured_at=captured_at,
                 full_path=resolved_path,
+                allow_ocr=(mode != "structured"),
             )
             elapsed = (time.perf_counter() - start_time) * 1000
             return FileIngestionResult(

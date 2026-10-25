@@ -97,3 +97,24 @@ class IntentOperationalMetadata:
 class IntentClassificationResult:
     intent: IntentModelOutput
     metadata: IntentOperationalMetadata
+
+
+class CachedIntentEntry(BaseModel):
+    """A classification bound to the exact input and model/prompt provenance."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    request_text_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_version: StrictStr = Field(min_length=1)
+    provider: StrictStr | None
+    model: StrictStr | None
+    intent: IntentModelOutput
+
+
+class IntentCacheFile(BaseModel):
+    """Versioned, all-or-nothing precomputed intent cache file."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    version: Literal[1]
+    classifications: dict[StrictStr, CachedIntentEntry]

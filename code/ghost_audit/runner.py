@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import csv
-import json
 import os
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -16,13 +14,14 @@ from ghost_audit.config import Settings, get_settings, REPO_ROOT
 from ghost_audit.evidence.service import EvidenceIngestionService
 from ghost_audit.identity.service import IdentityResolutionService
 from ghost_audit.intent.models import (
-    IntentClassificationResult,
-    IntentDecision,
+    CachedIntentEntry,
+    IntentCacheFile,
     IntentModelOutput,
-    IntentReason,
 )
-from ghost_audit.intent.service import IntentClassificationService
+from ghost_audit.intent.prompt import PROMPT_VERSION
+from ghost_audit.intent.service import IntentClassificationService, request_text_digest
 from ghost_audit.llm.config import get_model_settings
+from ghost_audit.llm.errors import ConfigurationError
 from ghost_audit.llm.gateway import ModelGateway
 from ghost_audit.llm.transport import OpenAIResponsesTransport
 from ghost_audit.llm.usage import UsageTracker
@@ -31,9 +30,7 @@ from ghost_audit.models.input_models import DeletionRequest
 from ghost_audit.models.output_models import (
     DeletionStatus,
     OutputRow,
-    validate_steps_sequence,
 )
-from ghost_audit.planner.models import CasePlan
 from ghost_audit.planner.service import AuditPlanGenerator
 from ghost_audit.policy.service import PolicyDecisionEngine
 from ghost_audit.retrieval.index import CorpusIndex
@@ -77,7 +74,7 @@ class AuditPipelineRunner:
         self.usage_tracker = UsageTracker()
 
         # Initialize intent service or precomputed intent map
-        self.precomputed_intents: dict[str, Any] = {}
+        self.precomputed_intents: dict[str, CachedIntentEntry] = {}
         if intent_cache_path and Path(intent_cache_path).exists():
             self._load_intent_cache(Path(intent_cache_path))
 
@@ -92,21 +89,24 @@ class AuditPipelineRunner:
             self.intent_service = IntentClassificationService(gateway=gateway)
 
     def _load_intent_cache(self, path: Path) -> None:
-        """Load precomputed intent results from JSON file."""
+        """Load a strict, versioned intent cache or reject the whole file."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                for case_id, item in data.items():
-                    if isinstance(item, dict):
-                        try:
-                            self.precomputed_intents[case_id] = IntentModelOutput.model_validate(item)
-                        except Exception:
-                            self.precomputed_intents[case_id] = item
-                    else:
-                        self.precomputed_intents[case_id] = item
+            cache = IntentCacheFile.model_validate_json(path.read_text(encoding="utf-8"), strict=True)
         except Exception as ex:
-            print(f"Warning: Failed to load intent cache from {path}: {ex}", file=sys.stderr)
+            raise ConfigurationError(f"Invalid intent cache {path}: strict validation failed.") from ex
+        self.precomputed_intents = dict(cache.classifications)
+
+    @staticmethod
+    def _validated_cached_intent(entry: CachedIntentEntry, request: DeletionRequest) -> IntentModelOutput:
+        if entry.prompt_version != PROMPT_VERSION:
+            raise ConfigurationError(
+                f"Intent cache prompt mismatch for {request.case_id}: expected {PROMPT_VERSION}."
+            )
+        if entry.request_text_sha256 != request_text_digest(request.request_text):
+            raise ConfigurationError(f"Intent cache request-text mismatch for {request.case_id}.")
+        if entry.intent.supporting_quote not in request.request_text:
+            raise ConfigurationError(f"Intent cache quote mismatch for {request.case_id}.")
+        return entry.intent
 
     def run(
         self,
@@ -175,7 +175,8 @@ class AuditPipelineRunner:
 
         for req in target_requests:
             # Check precomputed intent
-            precomputed = self.precomputed_intents.get(req.case_id)
+            cached_entry = self.precomputed_intents.get(req.case_id)
+            precomputed = self._validated_cached_intent(cached_entry, req) if cached_entry else None
 
             # Retrieve evidence packet
             packet = retrieval_service.retrieve_for_case(
@@ -222,11 +223,18 @@ class AuditPipelineRunner:
         output_rows.sort(key=lambda r: r.case_id)
 
         # Validate whole run
-        is_submittable = (
+        selected_ids = [request.case_id for request in target_requests]
+        row_ids = [row.case_id for row in output_rows]
+        selected_run_complete = (
             summary.unresolved_cases == 0
             and summary.diagnostic_bypass_count == 0
-            and len(output_rows) == summary.total_cases
+            and not bundle.errors
+            and len(row_ids) == len(set(row_ids))
+            and set(row_ids) == set(selected_ids)
+            and row_ids == sorted(row_ids)
         )
+        is_full_evaluation = not sample and case_id is None
+        is_submittable = selected_run_complete and is_full_evaluation and not self.diagnostic
         summary.is_valid_for_submission = is_submittable
         summary.execution_time_ms = (time.perf_counter() - start_time) * 1000
 
@@ -240,6 +248,9 @@ class AuditPipelineRunner:
                 output_rows=output_rows,
                 output_path=Path(output_file),
                 is_submittable=is_submittable,
+                selected_run_complete=selected_run_complete,
+                expected_case_ids=set(selected_ids),
+                diagnostic=self.diagnostic,
             )
             summary.output_path = str(output_file)
 
@@ -250,23 +261,47 @@ class AuditPipelineRunner:
         output_rows: list[OutputRow],
         output_path: Path,
         is_submittable: bool,
+        selected_run_complete: bool,
+        expected_case_ids: set[str],
+        diagnostic: bool,
     ) -> None:
-        """Atomically write and validate output CSV. Does not overwrite if run is invalid unless non-root artifact."""
+        """Validate coverage and atomically replace only an eligible output artifact."""
         output_path = output_path.resolve()
         is_root_submission = (output_path == (REPO_ROOT / "output.csv").resolve())
 
-        # A failed or unresolved run must not overwrite the valid root output.csv!
-        if is_root_submission and not is_submittable and not self.diagnostic:
+        if is_root_submission and not is_submittable:
             raise RuntimeError(
-                f"Cannot overwrite submission file {output_path}: run contains unresolved cases or diagnostic bypass."
+                f"Cannot overwrite submission file {output_path}: only a complete, non-diagnostic "
+                "518-case evaluation run is eligible."
             )
+
+        if diagnostic:
+            artifacts_root = (REPO_ROOT / "artifacts").resolve()
+            try:
+                output_path.relative_to(artifacts_root)
+            except ValueError as exc:
+                raise RuntimeError("Diagnostic CSVs must be written under the repository artifacts directory.") from exc
+            if "diagnostic" not in output_path.stem.lower():
+                raise RuntimeError("Diagnostic CSV filenames must contain the label 'diagnostic'.")
+        elif not selected_run_complete:
+            raise RuntimeError("Cannot export an unresolved, failed, or incomplete-coverage run.")
+
+        row_ids = [row.case_id for row in output_rows]
+        if len(row_ids) != len(set(row_ids)):
+            raise ValueError("Output contains duplicate case IDs.")
+        if not diagnostic and set(row_ids) != expected_case_ids:
+            missing = sorted(expected_case_ids - set(row_ids))
+            extra = sorted(set(row_ids) - expected_case_ids)
+            raise ValueError(f"Output case coverage mismatch; missing={missing}, extra={extra}.")
+        if row_ids != sorted(row_ids):
+            raise ValueError("Output rows must be sorted lexicographically by case_id.")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Validate every row before writing
         for row in output_rows:
             validation_errors = row.validate_row()
-            if validation_errors and not self.diagnostic:
+            if validation_errors:
                 raise ValueError(f"Output row {row.case_id} failed validation: {'; '.join(validation_errors)}")
 
         # Write to temporary file in same directory for atomic replace

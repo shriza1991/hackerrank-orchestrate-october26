@@ -148,6 +148,24 @@ class GroundedCategoryClassifier:
             signals.add(DataCategory.BACKUP_ARCHIVE)
             bases.append(f"Backup archive store '{table_name}'")
 
+        collection_name = str(facts.get("collection_name") or "").lower()
+        facts_text = str(facts.get("raw_text") or facts.get("details") or "").lower()
+        if collection_name == "ticket_attachments" or (
+            system_id.lower() in {"support_platform", "object_storage"}
+            and "attachment" in facts_text
+        ):
+            signals.add(DataCategory.SUPPORT_ATTACHMENT)
+            bases.append("Explicit attachment collection/content context")
+        if (
+            system_id.lower() == "legal_retention_service"
+            and (resource_id.upper().startswith("ORD-") or facts.get("retention_until"))
+        ):
+            signals.add(DataCategory.LEGAL_HOLD_RECORD)
+            bases.append("Legal retention register record with supplied retention facts")
+        if system_id.lower() == "object_storage" and "attachment catalog" in facts_text:
+            signals.add(DataCategory.SUPPORT_ATTACHMENT)
+            bases.append("Participant-visible attachment catalog relationship")
+
         # 3. Grounded system & resource naming patterns
         r_lower = resource_id.lower()
         sys_lower = system_id.lower()

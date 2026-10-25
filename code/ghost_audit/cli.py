@@ -579,10 +579,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"Error executing audit pipeline: {ex}", file=sys.stderr)
             return 1
 
-        if args.usage_report and summary.usage_summary:
+        if args.usage_report:
             try:
-                with open(args.usage_report, "w", encoding="utf-8") as f:
-                    json.dump(summary.usage_summary, f, indent=2)
+                runner.usage_tracker.write_json(
+                    args.usage_report,
+                    run_provenance={
+                        "command": "run-audit",
+                        "sample": args.sample,
+                        "case_id": args.case_id,
+                        "mode": args.mode,
+                        "diagnostic": args.diagnostic,
+                        "live": args.live,
+                        "output_path": summary.output_path,
+                        "is_valid_for_submission": summary.is_valid_for_submission,
+                    },
+                )
             except Exception as ex:
                 print(f"Warning: Failed to write usage report to {args.usage_report}: {ex}", file=sys.stderr)
 

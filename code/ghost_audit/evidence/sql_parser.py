@@ -1,5 +1,6 @@
 """SQL snapshot evidence parser executing isolated in-memory SQLite instances."""
 
+import json
 import re
 import sqlite3
 from datetime import datetime
@@ -279,6 +280,20 @@ class SqlEvidenceParser:
                         obs_idx += 1
                         row_dict = dict(zip(col_names, row))
                         res_id = row_dict.get("resource_id")
+                        # Generic snapshot tables carry the authoritative
+                        # source system per row. Do not assign support,
+                        # identity, or security records to account_service just
+                        # because the physical export table is hosted there.
+                        row_system_id = row_dict.get("origin_system") or table_sys_id
+                        record_json = row_dict.get("record_json")
+                        if isinstance(record_json, str):
+                            try:
+                                decoded_record = json.loads(record_json)
+                                if isinstance(decoded_record, dict):
+                                    for key, value in decoded_record.items():
+                                        row_dict.setdefault(key, value)
+                            except json.JSONDecodeError:
+                                pass
                         
                         # Determine timestamp
                         row_time = header_captured_at
@@ -315,7 +330,7 @@ class SqlEvidenceParser:
                                 source_locator=f"table:{table_name}:row:{r_idx}",
                                 capture_time=manifest_captured_at,
                                 observation_time=row_time,
-                                system_id=table_sys_id,
+                                system_id=row_system_id,
                                 resource_id=res_id,
                                 extracted_facts=row_dict,
                                 extraction_method=self.parser_name,

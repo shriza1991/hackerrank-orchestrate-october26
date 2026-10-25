@@ -27,6 +27,7 @@ class PlannedStep(BaseModel):
     operation: StepOperation
     state: StepState
     evidence_id: str = ""
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     execution_priority: int = 100
     target_copy: Optional[str] = None

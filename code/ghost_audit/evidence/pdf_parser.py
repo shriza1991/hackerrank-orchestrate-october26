@@ -76,6 +76,7 @@ class PdfEvidenceParser:
         origin: str,
         manifest_captured_at: datetime,
         full_path: Path,
+        allow_ocr: bool = True,
     ) -> FileIngestionResult:
         """Parse native text and layout from PDF document, emitting structured EvidenceObservation items."""
         if not full_path.exists():
@@ -178,12 +179,13 @@ class PdfEvidenceParser:
             # Check if page has unusable or absent text
             if len(page_text.strip()) < 15:
                 # Page has no native text; attempt local OCR if RapidOCR is available and fitz is active
-                ocr_text = self._attempt_ocr_page(page, use_fitz)
+                ocr_text = self._attempt_ocr_page(page, use_fitz) if allow_ocr else None
                 if ocr_text:
                     page_text = ocr_text
                     warnings.append(f"Page {page_idx} extracted via fallback OCR.")
                 else:
-                    warnings.append(f"Page {page_idx} has unusable or absent native text; OCR was unavailable or produced no text.")
+                    reason = "OCR disabled for safe structured mode" if not allow_ocr else "OCR was unavailable or produced no text"
+                    warnings.append(f"Page {page_idx} has unusable or absent native text; {reason}.")
                     continue
 
             # Check if this page contains a multi-record table (e.g. Disputed Orders / Retention Register)
@@ -212,6 +214,8 @@ class PdfEvidenceParser:
                         "amount": amount,
                         "retention_until": retain_until_raw,
                         "retention_until_iso": parsed_retention.isoformat() if parsed_retention else None,
+                        "hold_status": "ACTIVE",
+                        "hold_end": parsed_retention.isoformat() if parsed_retention else retain_until_raw,
                         "finance_owner": owner,
                         "raw_entry": match.group(0),
                     }
@@ -346,6 +350,9 @@ class PdfEvidenceParser:
             extracted_facts["customer_name"] = customer_name
         if retention_info:
             extracted_facts["retention"] = retention_info
+            extracted_facts["retention_until"] = (
+                retention_info["retention_until_iso"] or retention_info["retention_until_raw"]
+            )
 
         return EvidenceObservation(
             evidence_id=file_id,

@@ -14,6 +14,7 @@ from ghost_audit.evidence.common import compute_content_digest, extract_subject_
 from ghost_audit.evidence.json_parser import JsonEvidenceParser
 from ghost_audit.evidence.log_parser import LogEvidenceParser
 from ghost_audit.evidence.models import IngestionStatus, ObservationType
+from ghost_audit.evidence.pdf_parser import PdfEvidenceParser
 from ghost_audit.evidence.service import EvidenceIngestionService
 from ghost_audit.evidence.sql_parser import SqlEvidenceParser
 from ghost_audit.models.input_models import EvidenceManifestEntry
@@ -227,6 +228,26 @@ def test_sql_distinct_topology_context():
     assert row_ap.scope_context["topology"] == "regional_replicas"
 
 
+def test_sql_generic_snapshot_uses_row_origin_and_decodes_record_json():
+    parser = SqlEvidenceParser()
+    now = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+    sql_text = """
+    CREATE TABLE records (
+        resource_id TEXT, origin_system TEXT, record_json TEXT, captured_at TEXT
+    );
+    INSERT INTO records VALUES (
+        'support_42', 'support_platform',
+        '{"collection":"ticket_attachments","exclusive_to_subject":true}',
+        '2026-09-15T11:00:00Z'
+    );
+    """
+    res = parser.parse("evidence_sql_origin", "test.sql", "account_export", now, sql_text)
+    row = [o for o in res.observations if o.resource_id == "support_42"][0]
+    assert row.system_id == "support_platform"
+    assert row.extracted_facts["collection"] == "ticket_attachments"
+    assert row.extracted_facts["exclusive_to_subject"] is True
+
+
 def test_sql_null_and_quoted_unicode_values():
     """Verify SQLite NULL and Unicode values are preserved intact."""
     parser = SqlEvidenceParser()
@@ -438,38 +459,57 @@ def test_text_handover_parsing():
 # Integration and Manifest Coverage Tests
 # ---------------------------------------------------------------------------
 
-def test_all_79_supported_files_ingested_cleanly():
-    """Verify all 79 supported structured files in the dataset manifest parse cleanly."""
+def test_native_pdf_structured_parse_never_invokes_ocr(real_dataset_dir, monkeypatch):
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("OCR must not run while validating native PDF extraction")
+
+    parser = PdfEvidenceParser()
+    monkeypatch.setattr(parser, "_attempt_ocr_page", fail_if_called)
+    path = real_dataset_dir / "evidence/documents/account_history_report_20260718.pdf"
+    result = parser.parse(
+        "evidence_18",
+        "evidence/documents/account_history_report_20260718.pdf",
+        "account_history_service",
+        datetime(2026, 7, 18, 11, 0, 0, tzinfo=timezone.utc),
+        path,
+        allow_ocr=False,
+    )
+    assert result.status == IngestionStatus.PARSED
+    assert result.observation_count > 0
+
+def test_all_83_safe_structured_and_native_pdf_files_ingested_cleanly():
+    """Structured mode parses text formats plus native-text PDFs without OCR."""
     settings = get_settings()
     service = EvidenceIngestionService(settings)
     summary = service.ingest_manifest()
 
     assert summary.manifest_file_count == 94
-    assert summary.parsed_count == 79
+    assert summary.parsed_count == 83
     assert summary.partial_count == 0
     assert summary.failed_count == 0
-    assert summary.deferred_count == 15
-    assert summary.total_observations == 4241
+    assert summary.deferred_count == 11
+    assert summary.total_observations == 4253
 
     # Exact format counts
     assert summary.by_format["sql"]["parsed"] == 24
     assert summary.by_format["json"]["parsed"] == 28
     assert summary.by_format["log"]["parsed"] == 26
     assert summary.by_format["txt"]["parsed"] == 1
+    assert summary.by_format["pdf"]["parsed"] == 4
 
 
-def test_all_15_multimodal_files_deferred():
-    """Verify all 15 PDF and PNG files are explicitly marked DEFERRED with 0 observations."""
+def test_all_11_ocr_dependent_images_deferred():
+    """Structured mode defers only OCR-dependent images and never invokes OCR."""
     settings = get_settings()
     service = EvidenceIngestionService(settings)
     summary = service.ingest_manifest()
 
     deferred = [r for r in summary.file_results if r.status == IngestionStatus.DEFERRED]
-    assert len(deferred) == 15
+    assert len(deferred) == 11
     for d in deferred:
         assert d.observation_count == 0
-        assert d.format in {"pdf", "png"}
-        assert any("deferred to Task 7" in w for w in d.warnings)
+        assert d.format == "png"
+        assert any("OCR-dependent image" in w for w in d.warnings)
 
 
 def test_repeated_ingestion_determinism():

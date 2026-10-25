@@ -34,6 +34,35 @@ repo_root=c:\Users\dyara\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=none
 
+## [2026-10-25T18:23:38.8528831+05:30] Task 12 submission blockers and offline evaluation
+
+User Prompt (verbatim, secrets redacted):
+# Files pasted by the user:
+
+## "Implement Task 12: fix submission blockers, evaluate the working pipeline, reso…": C:\Users\dyara\.codex/attachments/84828f11-fe2e-43c4-8186-88f3cae5f902/pasted-text.txt
+
+Pasted text contains the user's request.
+
+## My request:
+
+Agent Response Summary:
+Implemented fail-closed fixes for RETAIN planning, exact citation validation, output protection, strict intent-cache provenance, usage persistence, dependency graphs, structured PDF/SQL parsing, and process-versus-record reconstruction. Added targeted regressions and finished with 292 safe non-OCR tests passing plus valid sample and full dataset inspections. Genuine sample accuracy was not measured because no paid-call authorization or validated intent cache was available; diagnostics resolved 4/32 sample cases and 78/518 full cases, leaving 28 and 440 unresolved respectively, and no root output.csv or final usage report was created.
+
+Actions:
+* Modified planner, runner, intent cache, usage tracking, evidence ingestion, policy classification, and state reconstruction services.
+* Added tests/test_task12_submission_blockers.py and expanded tests/test_evidence_ingestion.py.
+* Updated code/evaluation/evaluation_report.md with measured diagnostic metrics, commands, fixes, and limitations.
+* Ran 292-test safe non-OCR suite, both dataset inspections, sample diagnostic evaluation, full structured diagnostics, usage JSON persistence check, dataset preservation check, compileall, and git diff validation.
+* Wrote diagnostic artifacts only under artifacts/; did not call paid models, retry OCR, create root output.csv, create a final usage report, commit, push, or package.
+
+Context:
+tool=Codex Desktop
+model=gpt-5
+branch=main
+repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+
 ## [2026-10-25T10:26:47.1463954+05:30] SESSION START
 
 tool=Codex Desktop
@@ -983,6 +1012,35 @@ repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=none
 
+## [2026-10-25T18:23:38.8528831+05:30] Task 12 submission blockers and offline evaluation
+
+User Prompt (verbatim, secrets redacted):
+# Files pasted by the user:
+
+## "Implement Task 12: fix submission blockers, evaluate the working pipeline, reso…": C:\Users\dyara\.codex/attachments/84828f11-fe2e-43c4-8186-88f3cae5f902/pasted-text.txt
+
+Pasted text contains the user's request.
+
+## My request:
+
+Agent Response Summary:
+Implemented fail-closed fixes for RETAIN planning, exact citation validation, output protection, strict intent-cache provenance, usage persistence, dependency graphs, structured PDF/SQL parsing, and process-versus-record reconstruction. Added targeted regressions and finished with 292 safe non-OCR tests passing plus valid sample and full dataset inspections. Genuine sample accuracy was not measured because no paid-call authorization or validated intent cache was available; diagnostics resolved 4/32 sample cases and 78/518 full cases, leaving 28 and 440 unresolved respectively, and no root output.csv or final usage report was created.
+
+Actions:
+* Modified planner, runner, intent cache, usage tracking, evidence ingestion, policy classification, and state reconstruction services.
+* Added tests/test_task12_submission_blockers.py and expanded tests/test_evidence_ingestion.py.
+* Updated code/evaluation/evaluation_report.md with measured diagnostic metrics, commands, fixes, and limitations.
+* Ran 292-test safe non-OCR suite, both dataset inspections, sample diagnostic evaluation, full structured diagnostics, usage JSON persistence check, dataset preservation check, compileall, and git diff validation.
+* Wrote diagnostic artifacts only under artifacts/; did not call paid models, retry OCR, create root output.csv, create a final usage report, commit, push, or package.
+
+Context:
+tool=Codex Desktop
+model=gpt-5
+branch=main
+repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+
 ## [2026-10-25T10:55:10.245164+00:00] SESSION START
 
 tool=Antigravity
@@ -1290,6 +1348,35 @@ Actions:
 Context:
 tool=Antigravity
 model=gemini-3.8-flash
+branch=main
+repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+
+## [2026-10-25T18:23:38.8528831+05:30] Task 12 submission blockers and offline evaluation
+
+User Prompt (verbatim, secrets redacted):
+# Files pasted by the user:
+
+## "Implement Task 12: fix submission blockers, evaluate the working pipeline, reso…": C:\Users\dyara\.codex/attachments/84828f11-fe2e-43c4-8186-88f3cae5f902/pasted-text.txt
+
+Pasted text contains the user's request.
+
+## My request:
+
+Agent Response Summary:
+Implemented fail-closed fixes for RETAIN planning, exact citation validation, output protection, strict intent-cache provenance, usage persistence, dependency graphs, structured PDF/SQL parsing, and process-versus-record reconstruction. Added targeted regressions and finished with 292 safe non-OCR tests passing plus valid sample and full dataset inspections. Genuine sample accuracy was not measured because no paid-call authorization or validated intent cache was available; diagnostics resolved 4/32 sample cases and 78/518 full cases, leaving 28 and 440 unresolved respectively, and no root output.csv or final usage report was created.
+
+Actions:
+* Modified planner, runner, intent cache, usage tracking, evidence ingestion, policy classification, and state reconstruction services.
+* Added tests/test_task12_submission_blockers.py and expanded tests/test_evidence_ingestion.py.
+* Updated code/evaluation/evaluation_report.md with measured diagnostic metrics, commands, fixes, and limitations.
+* Ran 292-test safe non-OCR suite, both dataset inspections, sample diagnostic evaluation, full structured diagnostics, usage JSON persistence check, dataset preservation check, compileall, and git diff validation.
+* Wrote diagnostic artifacts only under artifacts/; did not call paid models, retry OCR, create root output.csv, create a final usage report, commit, push, or package.
+
+Context:
+tool=Codex Desktop
+model=gpt-5
 branch=main
 repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
 worktree=main
