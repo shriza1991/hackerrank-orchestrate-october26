@@ -165,6 +165,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Write development accounting to ignored artifacts/intent-classification-usage.md.",
     )
 
+    identity_parser = subparsers.add_parser(
+        "resolve-identity", help="Resolve request email to stable user identity and recover identifiers."
+    )
+    identity_input = identity_parser.add_mutually_exclusive_group(required=True)
+    identity_input.add_argument("--case", dest="case_id", help="Case ID to load and resolve.")
+    identity_input.add_argument("--email", help="Request email to resolve directly.")
+    identity_input.add_argument("--batch", action="store_true", help="Batch resolve all requests in dataset.")
+
+    identity_parser.add_argument("--audit-at", help="Audit cutoff timestamp (ISO-8601). Required with --email.")
+    identity_parser.add_argument("--requested-at", help="Request submission timestamp (ISO-8601).")
+    identity_parser.add_argument("--sample", action="store_true", help="Resolve from sample requests.")
+    identity_parser.add_argument("--dataset", type=Path, default=None, help="Dataset directory override.")
+    identity_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON format.")
+    identity_parser.add_argument(
+        "--report", action="store_true", help="Write batch diagnostic summary to artifacts/."
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -185,6 +202,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_intent_classification(
             text=args.text, case_id=args.case_id, sample=args.sample, dataset=args.dataset,
             live=args.live, write_report=args.report,
+        )
+
+    if args.command == "resolve-identity":
+        from ghost_audit.identity.cli import run_identity_resolution
+
+        return run_identity_resolution(
+            case_id=args.case_id,
+            email=args.email,
+            audit_at=args.audit_at,
+            requested_at=args.requested_at,
+            sample=args.sample,
+            batch=args.batch,
+            dataset=args.dataset,
+            json_output=args.json,
+            write_report=args.report,
         )
 
     return 0

@@ -374,3 +374,63 @@ accuracy. Live intent accuracy has not been measured.
 
 Task 4 does not resolve historical identities, inspect evidence, apply policy,
 plan remediation, decide final deletion status, or produce predictions.
+
+---
+
+## Historical Identity Resolution (Task 5)
+
+Task 5 adds the deterministic identity-resolution package under `code/ghost_audit/identity/`.
+It resolves request emails to stable user identities, recovers historical aliases and identifiers
+at the `audit_at` cutoff, and enforces strict temporal and cross-person isolation.
+
+### Features and Guarantees
+
+- **Normalization without Loss:** Whitespace trimming and case-insensitive email matching.
+  Original spelling is preserved. Plus-tags, dots, and provider heuristics are never removed
+  or inferred. Conservative phone normalization preserves country codes (`+`) and digits
+  without equating by suffix. Valid hexadecimal email hashes are normalized to lowercase hex
+  without inventing hashing algorithms. Stable user IDs match exactly without prefix collisions.
+- **Strict Cutoffs and Temporal Rules:** Evidence is bounded inclusively by `audit_at`.
+  Audit events with `event_time > audit_at` and snapshots with `updated_at > audit_at`
+  are excluded from pre-cutoff resolution. Older eligible history establishes identity even when
+  the snapshot is in the future. Equal-timestamp events are sequenced only when transitions form
+  an unambiguous chain; otherwise conflicts are surfaced.
+- **Cross-Person Isolation:** Multi-valued indexes prevent cross-person alias overwrites.
+  Shared historical emails, recycled emails, and shared phone numbers never merge distinct subjects.
+  Multiple plausible candidates remain `AMBIGUOUS`.
+- **Rich Provenance and Searchable Identifiers:** Distinguishes current-at-cutoff identifiers
+  from historical aliases with half-open validity intervals (`[start, end)`). Provides
+  an explicitly cited, deterministically sorted collection of searchable identifiers for subsequent
+  evidence retrieval, citing actual `audit_id`s and snapshot row locators without inventing evidence citations.
+- **Offline and Model-Free:** Requires no model calls, API keys, or network connectivity.
+
+### Development CLI Commands
+
+Resolve identity for a single case from evaluation requests:
+
+```bash
+python code/main.py resolve-identity --case case_37
+python code/main.py resolve-identity --case case_01 --sample --json
+```
+
+Resolve identity for a direct email and audit cutoff:
+
+```bash
+python code/main.py resolve-identity --email "person@example.test" --audit-at "2026-09-01T12:00:00Z" --json
+```
+
+Run batch identity resolution summary:
+
+```bash
+python code/main.py resolve-identity --batch
+python code/main.py resolve-identity --batch --sample
+python code/main.py resolve-identity --batch --report
+```
+
+CLI Exit Codes:
+- `0`: Successful resolution execution (`RESOLVED`, `AMBIGUOUS`, or `UNRESOLVED`).
+- `1`: Dataset, file loading, or case-not-found error.
+- `2`: Malformed arguments or missing `--audit-at` for direct email mode.
+
+Task 5 does not inspect evidence files, apply deletion policy, plan remediation,
+or generate final prediction outputs.

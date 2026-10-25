@@ -29,6 +29,14 @@ class IdentityResolutionResult(BaseModel):
     supporting_references: list[str] = Field(default_factory=list)  # audit_ids, activity_ids, etc.
     applicable_timestamps: dict[str, datetime] = Field(default_factory=dict)
     notes: Optional[str] = None
+    request_email: Optional[str] = None
+    normalized_request_email: Optional[str] = None
+    match_method: Optional[str] = None
+    candidates: list[str] = Field(default_factory=list)
+    searchable_identifiers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
+    provenance: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("applicable_timestamps", mode="before")
     @classmethod
