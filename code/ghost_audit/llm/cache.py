@@ -52,13 +52,29 @@ class ResponseCache:
             return None
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                raise CacheError(f"Corrupted cache entry: {path}")
             if record.get("version") != CACHE_VERSION:
                 raise CacheError(f"Incompatible cache entry: {path}")
-            parsed = response_model.model_validate(record["parsed"], strict=True)
+            # Fresh responses use strict JSON validation. Re-serialize the
+            # JSON-compatible cached value through the same path so enum values
+            # behave identically without permitting primitive coercion.
+            parsed = response_model.model_validate_json(
+                json.dumps(record["parsed"], ensure_ascii=False), strict=True
+            )
+            for name in ("provider_model", "provider_request_id"):
+                if record.get(name) is not None and not isinstance(record.get(name), str):
+                    raise CacheError(f"Corrupted cache entry: {path}")
+            usage_value = record.get("usage")
+            if usage_value is not None:
+                if not isinstance(usage_value, dict):
+                    raise CacheError(f"Corrupted cache entry: {path}")
+                ProviderUsage(**usage_value)
             return parsed, record
         except CacheError:
             raise
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError,
+                AttributeError, ValidationError) as exc:
             raise CacheError(f"Corrupted cache entry: {path}") from exc
 
     def store(self, key: str, *, parsed: BaseModel, provider_model: str | None,

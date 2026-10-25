@@ -326,3 +326,51 @@ The transport follows the official OpenAI guidance for
 and [API error handling](https://developers.openai.com/api/docs/guides/error-codes).
 Task 3 contains no intent classifier, evidence processing, deletion decisions,
 or dataset prediction logic.
+
+---
+
+## Request-Intent Classification (Task 4)
+
+Task 4 adds the reusable classifier under `code/ghost_audit/intent/`. Its
+versioned prompt is `intent-v1`, and its strict internal decisions are
+`DELETION_REQUEST`, `NON_DELETION`, and `AMBIGUOUS`. The result includes a
+documented reason code, an exact quote from the supplied text, and a concise
+explanation. Call provenance, cache status, and usage references are kept in
+separate operational metadata.
+
+The classifier treats multilingual request text as untrusted JSON-delimited
+data. It distinguishes direct and polite deletion requests, prior-deletion
+follow-ups, export-then-delete requests, non-deletion actions, negation,
+hypothetical questions, and unresolved contradictions. Only `request_text`
+is supplied as semantic input; case IDs are accounting metadata and workflow
+status, email, activity, and sample answers are not included in the prompt.
+
+Inspect the configuration for direct text without making a network call:
+
+```bash
+python code/main.py classify-intent --text "Please delete my account."
+```
+
+Classify one supplied request after explicitly authorizing a potentially paid
+call:
+
+```bash
+python code/main.py classify-intent --text "Please delete my account." --live
+python code/main.py classify-intent --case case_01 --sample --live
+python code/main.py classify-intent --case case_33 --live
+```
+
+Use `--dataset path/to/dataset` with case mode to override the dataset path.
+The optional `--report` flag writes development-only usage accounting to the
+ignored `artifacts/intent-classification-usage.md`; it never writes
+`output.csv` or replaces either final evaluation report.
+
+Provider, configuration, schema, and exact-quote validation failures remain
+explicit failures. A successful `AMBIGUOUS` result stays unresolved and is
+never converted to `NOT_APPLICABLE`. Offline fixtures cover the required
+English distinctions, prompt injection, Hindi, Spanish, Portuguese, French,
+and Arabic. They test integration with mocked expected outputs, not model
+accuracy. Live intent accuracy has not been measured.
+
+Task 4 does not resolve historical identities, inspect evidence, apply policy,
+plan remediation, decide final deletion status, or produce predictions.

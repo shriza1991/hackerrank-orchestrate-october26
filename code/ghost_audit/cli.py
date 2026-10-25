@@ -9,6 +9,7 @@ from typing import Any, Optional
 from ghost_audit.config import EXPECTED_COUNTS, Settings, get_settings
 from ghost_audit.loader import DataLoader
 from ghost_audit.llm.smoke import run_smoke
+from ghost_audit.intent.cli import run_intent_classification
 
 
 def inspect_dataset(
@@ -150,6 +151,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--report", action="store_true",
         help="Write development accounting to ignored artifacts/model-smoke-usage.md.",
     )
+    intent_parser = subparsers.add_parser(
+        "classify-intent", help="Classify one request's deletion authorization intent."
+    )
+    intent_input = intent_parser.add_mutually_exclusive_group(required=True)
+    intent_input.add_argument("--text", help="Request text to classify without loading a dataset.")
+    intent_input.add_argument("--case", dest="case_id", help="Case ID to load and classify.")
+    intent_parser.add_argument("--sample", action="store_true", help="Resolve --case from sample requests.")
+    intent_parser.add_argument("--dataset", type=Path, default=None, help="Dataset directory override.")
+    intent_parser.add_argument("--live", action="store_true", help="Authorize one potentially paid model call.")
+    intent_parser.add_argument(
+        "--report", action="store_true",
+        help="Write development accounting to ignored artifacts/intent-classification-usage.md.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -166,6 +180,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.command == "model-smoke":
         return run_smoke(live=args.live, write_report=args.report)
+
+    if args.command == "classify-intent":
+        return run_intent_classification(
+            text=args.text, case_id=args.case_id, sample=args.sample, dataset=args.dataset,
+            live=args.live, write_report=args.report,
+        )
 
     return 0
 
