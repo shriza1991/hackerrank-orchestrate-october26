@@ -67,6 +67,12 @@ class EvidenceObservation(BaseModel):
     extracted_facts: dict[str, Any] = Field(default_factory=dict)
     extraction_method: NonBlankStr = "UNSPECIFIED"
     uncertainty_or_warnings: list[str] = Field(default_factory=list)
+    internal_id: Optional[str] = None
+    file_path: Optional[str] = None
+    observation_type: Optional[str] = None
+    scope_context: dict[str, Any] = Field(default_factory=dict)
+    subject_references: list[str] = Field(default_factory=list)
+    content_digest: Optional[str] = None
 
     @field_validator("capture_time", "observation_time", mode="before")
     @classmethod

@@ -434,3 +434,85 @@ CLI Exit Codes:
 
 Task 5 does not inspect evidence files, apply deletion policy, plan remediation,
 or generate final prediction outputs.
+
+---
+
+## Structured Evidence Ingestion (Task 6)
+
+Task 6 implements deterministic, local structured evidence ingestion under `code/ghost_audit/evidence/`.
+It ingests and parses 79 supported participant evidence files into provenance-bearing `EvidenceObservation`s,
+and explicitly marks the remaining 15 multimodal files (PDFs and PNG images) as `DEFERRED` to Task 7.
+
+### Supported Evidence Formats
+
+1. **SQL Database Snapshots (24 files):**
+   - Executed inside an isolated in-memory SQLite database (`:memory:`).
+   - Blocks filesystem attachment (`ATTACH`, `DETACH`) and extension loading.
+   - Bounded execution opcode limit protects against runaway execution.
+   - Distinguishes primary, regional, failover, and reporting replica tables without collapsing rows.
+   - Preserves table names, schemas, row counts, and emits `INVENTORY_SCOPE` observations for empty and populated tables.
+
+2. **JSON Structures (28 files):**
+   - Ingests flat record arrays, snapshot bundles, service resource exports, connector configs, and analytics reports.
+   - Preserves stable JSON-path locators (e.g. `$.snapshots[0].records[3]`, `$.service_exports.account_service.profile_lookups[0]`).
+   - Distinguishes stored records from zero-hit query lookups and process configurations.
+   - Preserves explicit `null`, `false`, `0`, and empty string values.
+
+3. **Logs and Shift Handovers (27 files: 26 logs + 1 text):**
+   - Ingests structured JSON lines, pipe-delimited streams, bracketed logs, Cloud Runtime exports, syslog RFC-5424, and key-value lines.
+   - Tracks physical 1-based line locators (`line:42`).
+   - Links split trace start and completion events across common trace IDs without cross-pollinating unrelated requests.
+   - Parses shift handover markdown check items (`customer_account_handover_20261001.txt`).
+   - Retains unparseable fragments as `RAW_FRAGMENT` observations with diagnostic warnings.
+
+4. **Explicit Multimodal Deferral (15 files: 4 PDFs, 11 PNG images):**
+   - Explicitly marked with `IngestionStatus.DEFERRED` and `0` observations.
+   - Computed SHA-256 digest recorded for integrity verification.
+   - Deferred cleanly without failing structured ingestion.
+
+### Observation Model (`EvidenceObservation`)
+
+Extended with backward-compatible fields:
+- `evidence_id`: Manifest file ID reference.
+- `source_locator`: Stable JSONPath, SQL table/row, or physical log line locator.
+- `capture_time`: Manifest capture timestamp.
+- `observation_time`: Event or record content timestamp.
+- `system_id`: System or service context.
+- `resource_id`: Resource identifier (e.g. `account_005`).
+- `observation_type`: `STORED_RECORD`, `LOOKUP_RESULT`, `INVENTORY_SCOPE`, `PROCESS_CONFIG`, `OPERATIONAL_CLAIM`, or `RAW_FRAGMENT`.
+- `scope_context`: Store, collection, table, replica role, or trace context.
+- `subject_references`: Explicit subject identifiers present in the source.
+- `internal_id`: Deterministic observation reference (`obs:<evidence_id>:<index>`).
+- `content_digest`: SHA-256 digest of source content.
+
+### Evidence Ingestion CLI Commands
+
+Ingest all manifest evidence files:
+
+```bash
+python code/main.py ingest-evidence
+```
+
+Ingest a single evidence file:
+
+```bash
+python code/main.py ingest-evidence --file evidence_01
+python code/main.py ingest-evidence --file evidence_05 --report
+```
+
+Output machine-readable JSON summary:
+
+```bash
+python code/main.py ingest-evidence --json
+```
+
+Save observation artifacts under `artifacts/`:
+
+```bash
+python code/main.py ingest-evidence --artifacts-dir artifacts/
+```
+
+CLI Exit Codes:
+- `0`: Ingestion completed successfully (79 files parsed/partial, 15 files deferred, 0 failed).
+- `1`: Ingestion failed (file missing, malformed required input, or unsafe directive).
+

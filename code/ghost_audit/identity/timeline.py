@@ -34,14 +34,15 @@ def _order_equal_time_events(
     field_name: str,
     warnings: list[str],
     conflicts: list[str],
-) -> list[UserAuditLogEntry]:
+) -> tuple[list[UserAuditLogEntry], bool]:
     """Order equal-timestamp events if they form an unambiguous linear chain.
 
+    Returns (ordered_events, is_conflicted).
     If transitions do not determine an unambiguous chain, surfaces the conflict
-    and returns a deterministic fallback ordering without claiming false authority.
+    and returns (sorted_events, True) without claiming false authority.
     """
     if len(events) <= 1:
-        return events
+        return events, False
 
     # Build old_value -> event map
     old_to_event: dict[str, list[UserAuditLogEntry]] = defaultdict(list)
@@ -65,7 +66,7 @@ def _order_equal_time_events(
             else:
                 curr = None
         if len(chain) == len(events):
-            return chain
+            return chain, False
 
     # Ambiguous or branching transitions at the same timestamp
     ts_str = events[0].event_time.isoformat()
@@ -75,8 +76,8 @@ def _order_equal_time_events(
     )
     conflicts.append(msg)
     warnings.append(msg)
-    # Return sorted by audit_id as deterministic fallback
-    return sorted(events, key=lambda x: x.audit_id)
+    # Return sorted by audit_id as deterministic fallback with is_conflicted=True
+    return sorted(events, key=lambda x: x.audit_id), True
 
 
 def reconstruct_user_timeline(
@@ -159,9 +160,12 @@ def reconstruct_user_timeline(
             time_groups[l.event_time].append(l)
 
         ordered_field_logs: list[UserAuditLogEntry] = []
+        conflicted_timestamps: set[datetime] = set()
         for t in sorted(time_groups.keys()):
             grp = time_groups[t]
-            ordered_grp = _order_equal_time_events(grp, field_name, warnings, conflicts)
+            ordered_grp, is_conflicted = _order_equal_time_events(grp, field_name, warnings, conflicts)
+            if is_conflicted:
+                conflicted_timestamps.add(t)
             ordered_field_logs.extend(ordered_grp)
 
         for l in ordered_field_logs:
@@ -186,7 +190,6 @@ def reconstruct_user_timeline(
             if not raw_old:
                 continue
             norm_old = normalizer(raw_old)
-            # Only record if it's the first log, or if there's a gap from previous new_value
             prev_new = ordered_field_logs[i - 1].new_value.strip() if i > 0 else ""
             if i == 0 or norm_old != normalizer(prev_new):
                 v_start = ordered_field_logs[i - 1].event_time if i > 0 else None
@@ -216,16 +219,102 @@ def reconstruct_user_timeline(
                     )
                 )
 
+        # Determine current-at-cutoff value first to properly categorize transition new_values
+        last_log = ordered_field_logs[-1] if ordered_field_logs else None
+        latest_audit_time = last_log.event_time if last_log else None
+        has_latest_conflict = (latest_audit_time is not None and latest_audit_time in conflicted_timestamps)
+        snapshot_val = getattr(valid_snapshot, field_name, "").strip() if valid_snapshot else ""
+        has_later_snapshot = (
+            valid_snapshot is not None
+            and (valid_snapshot.updated_at > latest_audit_time if latest_audit_time else True)
+        )
+
+        curr_raw = ""
+        curr_norm = ""
+
+        if has_latest_conflict and not has_later_snapshot:
+            # Equal-time conflict without independent later snapshot:
+            # Audit-ID sorting must not determine whether B or C is current.
+            warnings.append(
+                f"Current value for {norm_uid} field '{field_name}' is unknown due to unresolved "
+                f"equal-timestamp conflict at {latest_audit_time.isoformat()}."
+            )
+        elif valid_snapshot is not None and (
+            has_later_snapshot or (not has_latest_conflict and valid_snapshot.updated_at >= latest_audit_time)
+        ):
+            # Snapshot is later than (or equal to unconflicted) audit changes
+            curr_raw = snapshot_val
+            curr_norm = normalizer(curr_raw)
+            snap_prov = IdentifierProvenance(
+                source_type=SourceType.SNAPSHOT,
+                source_file="user_identities.csv",
+                source_id=None,
+                source_locator=f"user_id:{norm_uid}",
+                field_name=field_name,
+                raw_value=curr_raw,
+                normalized_value=curr_norm,
+                timestamp=valid_snapshot.updated_at,
+                change_type="CURRENT_SNAPSHOT",
+                validity_start=latest_audit_time,
+                validity_end=None,
+            )
+            all_provenance.append(snap_prov)
+            if curr_raw:
+                current_identifiers[field_name] = curr_raw
+                normalized_current_identifiers[field_name] = curr_norm
+            if last_log is not None and normalizer(snapshot_val) != normalizer(last_log.new_value):
+                warnings.append(
+                    f"Discrepancy for {norm_uid} field '{field_name}': snapshot value '{snapshot_val}' "
+                    f"at {valid_snapshot.updated_at} differs from latest audit log '{last_log.new_value}' "
+                    f"at {last_log.event_time}."
+                )
+        elif last_log is not None and not has_latest_conflict:
+            # Audit log is newer than snapshot (or no snapshot) and unconflicted
+            curr_raw = last_log.new_value.strip()
+            curr_norm = normalizer(curr_raw)
+            if curr_raw:
+                current_identifiers[field_name] = curr_raw
+                normalized_current_identifiers[field_name] = curr_norm
+            if snapshot_val:
+                snap_prov = IdentifierProvenance(
+                    source_type=SourceType.SNAPSHOT,
+                    source_file="user_identities.csv",
+                    source_id=None,
+                    source_locator=f"user_id:{norm_uid}",
+                    field_name=field_name,
+                    raw_value=snapshot_val,
+                    normalized_value=normalizer(snapshot_val),
+                    timestamp=valid_snapshot.updated_at,
+                    change_type="HISTORICAL_SNAPSHOT",
+                    validity_start=None,
+                    validity_end=last_log.event_time,
+                )
+                all_provenance.append(snap_prov)
+                historical_intervals.append(
+                    IdentifierInterval(
+                        field_name=field_name,
+                        raw_value=snapshot_val,
+                        normalized_value=normalizer(snapshot_val),
+                        is_current_at_cutoff=False,
+                        validity_start=None,
+                        validity_end=last_log.event_time,
+                        sources=[snap_prov],
+                    )
+                )
+
         # For each transition's new_value
         for i, l in enumerate(ordered_field_logs):
             raw_new = l.new_value.strip()
             if not raw_new:
-                # Value was cleared/removed
                 continue
             norm_new = normalizer(raw_new)
             v_start = l.event_time
-            v_end = ordered_field_logs[i + 1].event_time if (i + 1 < len(ordered_field_logs)) else None
-            is_last_log = (i == len(ordered_field_logs) - 1)
+            if i + 1 < len(ordered_field_logs):
+                v_end = ordered_field_logs[i + 1].event_time
+            elif valid_snapshot is not None and valid_snapshot.updated_at > l.event_time:
+                v_end = valid_snapshot.updated_at
+            else:
+                v_end = None
 
             prov = IdentifierProvenance(
                 source_type=SourceType.AUDIT_LOG,
@@ -242,7 +331,15 @@ def reconstruct_user_timeline(
             )
             all_provenance.append(prov)
 
-            if not is_last_log:
+            is_the_current_value = (
+                curr_raw != ""
+                and norm_new == curr_norm
+                and (i == len(ordered_field_logs) - 1)
+                and not has_latest_conflict
+                and not (valid_snapshot and valid_snapshot.updated_at > l.event_time and normalizer(snapshot_val) != norm_new)
+            )
+
+            if not is_the_current_value:
                 historical_intervals.append(
                     IdentifierInterval(
                         field_name=field_name,
@@ -255,114 +352,13 @@ def reconstruct_user_timeline(
                     )
                 )
 
-        # Determine current-at-cutoff value
-        last_log = ordered_field_logs[-1] if ordered_field_logs else None
-        snapshot_val = getattr(valid_snapshot, field_name, "").strip() if valid_snapshot else ""
-
-        if last_log is not None and valid_snapshot is not None:
-            if valid_snapshot.updated_at >= last_log.event_time:
-                # Snapshot is as-of or after the last audit change
-                curr_raw = snapshot_val
-                curr_norm = normalizer(curr_raw)
-                snap_prov = IdentifierProvenance(
-                    source_type=SourceType.SNAPSHOT,
-                    source_file="user_identities.csv",
-                    source_id=None,
-                    source_locator=f"user_id:{norm_uid}",
-                    field_name=field_name,
-                    raw_value=curr_raw,
-                    normalized_value=curr_norm,
-                    timestamp=valid_snapshot.updated_at,
-                    change_type="CURRENT_SNAPSHOT",
-                    validity_start=last_log.event_time,
-                    validity_end=None,
-                )
-                all_provenance.append(snap_prov)
-                if curr_raw:
-                    current_identifiers[field_name] = curr_raw
-                    normalized_current_identifiers[field_name] = curr_norm
-                if normalizer(snapshot_val) != normalizer(last_log.new_value):
-                    warnings.append(
-                        f"Discrepancy for {norm_uid} field '{field_name}': snapshot value '{snapshot_val}' "
-                        f"at {valid_snapshot.updated_at} differs from latest audit log '{last_log.new_value}' "
-                        f"at {last_log.event_time}."
-                    )
-            else:
-                # Audit log happened AFTER snapshot
-                curr_raw = last_log.new_value.strip()
-                curr_norm = normalizer(curr_raw)
-                if curr_raw:
-                    current_identifiers[field_name] = curr_raw
-                    normalized_current_identifiers[field_name] = curr_norm
-                # Snapshot value is historical
-                if snapshot_val:
-                    snap_prov = IdentifierProvenance(
-                        source_type=SourceType.SNAPSHOT,
-                        source_file="user_identities.csv",
-                        source_id=None,
-                        source_locator=f"user_id:{norm_uid}",
-                        field_name=field_name,
-                        raw_value=snapshot_val,
-                        normalized_value=normalizer(snapshot_val),
-                        timestamp=valid_snapshot.updated_at,
-                        change_type="HISTORICAL_SNAPSHOT",
-                        validity_start=None,
-                        validity_end=last_log.event_time,
-                    )
-                    all_provenance.append(snap_prov)
-                    historical_intervals.append(
-                        IdentifierInterval(
-                            field_name=field_name,
-                            raw_value=snapshot_val,
-                            normalized_value=normalizer(snapshot_val),
-                            is_current_at_cutoff=False,
-                            validity_start=None,
-                            validity_end=last_log.event_time,
-                            sources=[snap_prov],
-                        )
-                    )
-        elif valid_snapshot is not None:
-            # Snapshot only (no audit changes)
-            curr_raw = snapshot_val
-            curr_norm = normalizer(curr_raw)
-            if curr_raw:
-                current_identifiers[field_name] = curr_raw
-                normalized_current_identifiers[field_name] = curr_norm
-                snap_prov = IdentifierProvenance(
-                    source_type=SourceType.SNAPSHOT,
-                    source_file="user_identities.csv",
-                    source_id=None,
-                    source_locator=f"user_id:{norm_uid}",
-                    field_name=field_name,
-                    raw_value=curr_raw,
-                    normalized_value=curr_norm,
-                    timestamp=valid_snapshot.updated_at,
-                    change_type="CURRENT_SNAPSHOT",
-                    validity_start=None,
-                    validity_end=None,
-                )
-                all_provenance.append(snap_prov)
-        elif last_log is not None:
-            # Audit log only (e.g. absent or post-cutoff snapshot)
-            curr_raw = last_log.new_value.strip()
-            curr_norm = normalizer(curr_raw)
-            if curr_raw:
-                current_identifiers[field_name] = curr_raw
-                normalized_current_identifiers[field_name] = curr_norm
-        else:
-            # Unknown
-            pass
-
     # 5. Deduplicate historical identifiers while preserving provenance
-    # A historical alias is only kept if it differs from current_identifiers,
-    # or if an earlier interval is tracked.
     curr_norm_set = set(normalized_current_identifiers.values())
     hist_by_key: dict[tuple[str, str], dict[str, Any]] = {}
 
     for interval in historical_intervals:
         if not interval.normalized_value:
             continue
-        # If historical value is identical to current and has no distinct bounded past interval, skip
         if interval.normalized_value in curr_norm_set and interval.validity_end is None:
             continue
 
@@ -378,7 +374,6 @@ def reconstruct_user_timeline(
             }
         else:
             existing = hist_by_key[key]
-            # Merge sources without losing provenance
             existing_src_ids = {
                 (s.get("source_file"), s.get("source_locator"), s.get("change_type"))
                 for s in existing["sources"]
@@ -408,6 +403,32 @@ def reconstruct_user_timeline(
             searchable_set.add(h["raw_value"])
         if h["normalized_value"]:
             searchable_set.add(h["normalized_value"])
+
+    # Ensure every supported identifier from eligible logs and snapshot is preserved
+    for log in eligible_logs:
+        if log.old_value.strip():
+            raw_v = log.old_value.strip()
+            searchable_set.add(raw_v)
+            if log.field_name in FIELD_NORMALIZERS:
+                norm_v = FIELD_NORMALIZERS[log.field_name](raw_v)
+                if norm_v:
+                    searchable_set.add(norm_v)
+        if log.new_value.strip():
+            raw_v = log.new_value.strip()
+            searchable_set.add(raw_v)
+            if log.field_name in FIELD_NORMALIZERS:
+                norm_v = FIELD_NORMALIZERS[log.field_name](raw_v)
+                if norm_v:
+                    searchable_set.add(norm_v)
+
+    if valid_snapshot is not None:
+        for fn in ("email", "phone", "email_hash"):
+            val = getattr(valid_snapshot, fn, "").strip()
+            if val:
+                searchable_set.add(val)
+                norm_v = FIELD_NORMALIZERS[fn](val)
+                if norm_v:
+                    searchable_set.add(norm_v)
 
     sorted_searchable = sorted(searchable_set)
     sorted_audit_ids = sorted(supporting_audit_ids)

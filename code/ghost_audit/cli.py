@@ -182,6 +182,46 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--report", action="store_true", help="Write batch diagnostic summary to artifacts/."
     )
 
+    # Subcommand: ingest-evidence
+    evidence_parser = subparsers.add_parser(
+        "ingest-evidence",
+        help="Ingest structured evidence files from dataset and extract observations.",
+    )
+    evidence_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Path to dataset directory (defaults to configured dataset_dir).",
+    )
+    evidence_parser.add_argument(
+        "--file",
+        type=str,
+        default=None,
+        help="Specific evidence file_id to ingest (e.g. evidence_01).",
+    )
+    evidence_parser.add_argument(
+        "--batch",
+        action="store_true",
+        default=True,
+        help="Batch process all manifest evidence files (default).",
+    )
+    evidence_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON summary.",
+    )
+    evidence_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Optional directory to write observation artifacts (e.g. artifacts/).",
+    )
+    evidence_parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print detailed per-file status breakdown.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -217,6 +257,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             dataset=args.dataset,
             json_output=args.json,
             write_report=args.report,
+        )
+
+    if args.command == "ingest-evidence":
+        from ghost_audit.evidence.cli import run_evidence_ingestion
+
+        return run_evidence_ingestion(
+            dataset_dir=args.dataset,
+            file_id=args.file,
+            as_json=args.json,
+            artifacts_dir=args.artifacts_dir,
+            detailed_report=args.report,
         )
 
     return 0

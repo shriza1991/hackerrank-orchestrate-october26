@@ -490,3 +490,87 @@ def test_batch_resolution_on_dataset_files():
     assert sample_data["match_methods"]["CURRENT_SNAPSHOT_EMAIL"] == 28
     assert sample_data["match_methods"]["HISTORICAL_AUDIT_LOG_OLD_EMAIL"] == 3
     assert sample_data["match_methods"]["SNAPSHOT_AND_HISTORICAL_EMAIL"] == 1
+
+
+def test_gap_a_supported_aliases_preserved_despite_newer_snapshot():
+    """Gap A regression: Audit event A -> B in Feb, newer snapshot C in April, cutoff May.
+
+    Resolving B identifies subject; searchable identifiers contain A, B, and C.
+    B is preserved as a historical alias, C is current, and discrepancy is warned.
+    """
+    user = _make_identity(user_id="user_gap_a", email="email_c@example.com", updated_at="2026-04-15T00:00:00Z")
+    audit = _make_audit(
+        audit_id="audit_ab",
+        user_id="user_gap_a",
+        field_name="email",
+        old_value="email_a@example.com",
+        new_value="email_b@example.com",
+        event_time="2026-02-10T00:00:00Z",
+    )
+    service = IdentityResolutionService.from_data(identities=[user], audit_logs=[audit])
+
+    res = service.resolve_email("email_b@example.com", audit_at="2026-05-01T00:00:00Z")
+    assert res.resolution_status == IdentityResolutionStatus.RESOLVED
+    assert res.stable_subject_reference == "user_gap_a"
+    assert res.current_identifiers["email"] == "email_c@example.com"
+
+    # All three must be present in searchable identifiers
+    assert "email_a@example.com" in res.searchable_identifiers
+    assert "email_b@example.com" in res.searchable_identifiers
+    assert "email_c@example.com" in res.searchable_identifiers
+
+    # email_b must be in historical identifiers
+    hist_raw = [h["raw_value"] for h in res.historical_identifiers if h["field_name"] == "email"]
+    assert "email_a@example.com" in hist_raw
+    assert "email_b@example.com" in hist_raw
+
+    # Discrepancy warning between snapshot and last audit log must be recorded
+    assert any("Discrepancy" in w for w in res.warnings)
+
+
+def test_gap_b_equal_time_conflict_leaves_current_field_unknown():
+    """Gap B regression: Two events at the same timestamp A -> B and A -> C without later snapshot.
+
+    Audit-ID sorting must not pick B or C as current.
+    The current field remains unknown/omitted, while all aliases are preserved and subject is RESOLVED.
+    """
+    user = _make_identity(user_id="user_gap_b", email="ignored@example.com", updated_at="2026-01-01T00:00:00Z")
+    a1 = _make_audit("eq_1", "user_gap_b", "email", "email_a@example.com", "email_b@example.com", "2026-03-01T10:00:00Z")
+    a2 = _make_audit("eq_2", "user_gap_b", "email", "email_a@example.com", "email_c@example.com", "2026-03-01T10:00:00Z")
+    service = IdentityResolutionService.from_data(identities=[user], audit_logs=[a1, a2])
+
+    res = service.resolve_email("email_a@example.com", audit_at="2026-05-01T00:00:00Z")
+    assert res.resolution_status == IdentityResolutionStatus.RESOLVED
+    assert res.stable_subject_reference == "user_gap_b"
+
+    # Email field must be omitted from current_identifiers due to conflict
+    assert "email" not in res.current_identifiers
+    assert any("Conflicting audit events" in c for c in res.conflicts)
+    assert any("equal-timestamp conflict" in w for w in res.warnings)
+
+    # All candidate values remain searchable and present in historical identifiers
+    assert "email_a@example.com" in res.searchable_identifiers
+    assert "email_b@example.com" in res.searchable_identifiers
+    assert "email_c@example.com" in res.searchable_identifiers
+
+
+def test_gap_b_later_snapshot_resolves_conflict():
+    """Gap B regression: Later independent snapshot establishes current field while recording earlier conflict."""
+    user = _make_identity(user_id="user_gap_b_snap", email="email_d@example.com", updated_at="2026-04-01T00:00:00Z")
+    a1 = _make_audit("eq_1", "user_gap_b_snap", "email", "email_a@example.com", "email_b@example.com", "2026-03-01T10:00:00Z")
+    a2 = _make_audit("eq_2", "user_gap_b_snap", "email", "email_a@example.com", "email_c@example.com", "2026-03-01T10:00:00Z")
+    service = IdentityResolutionService.from_data(identities=[user], audit_logs=[a1, a2])
+
+    res = service.resolve_email("email_a@example.com", audit_at="2026-05-01T00:00:00Z")
+    assert res.resolution_status == IdentityResolutionStatus.RESOLVED
+    assert res.stable_subject_reference == "user_gap_b_snap"
+
+    # Later snapshot establishes current value
+    assert res.current_identifiers["email"] == "email_d@example.com"
+    # Earlier conflict remains recorded
+    assert any("Conflicting audit events" in c for c in res.conflicts)
+    # All values are searchable
+    assert "email_a@example.com" in res.searchable_identifiers
+    assert "email_b@example.com" in res.searchable_identifiers
+    assert "email_c@example.com" in res.searchable_identifiers
+    assert "email_d@example.com" in res.searchable_identifiers
