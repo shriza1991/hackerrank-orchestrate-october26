@@ -165,6 +165,7 @@ class ResourceStateAggregate(BaseModel):
     observed_pii_exposed: bool = False
     has_recreation_risk: bool = False
     has_restore_risk: bool = False
+    conflicts: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 

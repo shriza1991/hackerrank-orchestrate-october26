@@ -119,31 +119,82 @@ class ScopedInventoryChecker:
         system_id: str,
         target_resource_id: Optional[str],
         audit_at: datetime,
+        store_locator: Optional[str] = None,
+        subject_identifiers: Sequence[str] = (),
     ) -> Optional[ScopedAbsenceCheck]:
         """Check for explicit negative lookups (404, not_found, 0 rows returned) in observations."""
+        from ghost_audit.state.timestamp_interpreter import SourceAwareTimestampInterpreter
+
+        candidates: list[tuple[datetime, ScopedAbsenceCheck]] = []
+
         for so in selected_observations:
             obs = so.observation
-            if obs.system_id != system_id or obs.capture_time > audit_at:
+            if obs.system_id != system_id:
                 continue
+
+            # Validate observation timing against cutoff
+            ts_info = SourceAwareTimestampInterpreter.interpret_observation(obs, audit_at)
+            if not ts_info.is_eligible or ts_info.state_observation_time > audit_at:
+                continue
+
             facts = obs.extracted_facts or {}
+
+            # Grounded applicability to exact target_resource_id or subject query
+            obs_r_id = obs.resource_id or facts.get("resource_id") or facts.get("query_resource_id")
+            if target_resource_id:
+                if obs_r_id:
+                    if obs_r_id.strip().lower() != target_resource_id.strip().lower():
+                        continue
+                else:
+                    loc = (obs.source_locator or "").lower()
+                    if target_resource_id.lower() not in loc:
+                        if not any(ident.lower() in loc for ident in subject_identifiers):
+                            continue
+
+            # Grounded store/copy scope check
+            if store_locator:
+                s_loc = store_locator.lower()
+                obs_loc = (obs.source_locator or "").lower()
+                # Primary lookup cannot establish replica absence
+                if "primary" in s_loc and any(r in obs_loc for r in ["replica", "failover", "reporting"]):
+                    continue
+                if any(r in s_loc for r in ["replica", "failover", "reporting"]):
+                    if "primary" in obs_loc and not any(r in obs_loc for r in ["replica", "failover", "reporting"]):
+                        continue
+
             # Negative readback markers
             is_404 = facts.get("status_code") == 404 or facts.get("http_status") == 404
             is_not_found = (
                 facts.get("result") in {"NOT_FOUND", "ZERO_ROWS", "EMPTY"}
                 or facts.get("rows_returned") == 0
                 or "404 Not Found" in str(facts)
+                or "not found" in str(facts.get("message", "")).lower()
             )
             if is_404 or is_not_found:
-                return ScopedAbsenceCheck(
+                query_args = facts.get("query_args") or facts.get("params") or {
+                    k: v for k, v in facts.items() if k in {"resource_id", "email", "user_id", "id", "status_code", "result"}
+                }
+                check = ScopedAbsenceCheck(
                     system_id=system_id,
-                    resource_id=target_resource_id or obs.resource_id,
+                    resource_id=target_resource_id or obs_r_id,
                     source_id=obs.evidence_id,
                     source_locator=obs.source_locator,
-                    timestamp=obs.capture_time,
+                    timestamp=ts_info.state_observation_time,
                     table_scope=obs.source_locator or "query_readback",
-                    checked_identifiers=[],
+                    checked_identifiers=list(subject_identifiers),
                     membership_result="ABSENT",
-                    completeness_basis=f"Explicit negative readback lookup in {obs.evidence_id} returned not-found / zero rows.",
+                    completeness_basis=(
+                        f"Explicit negative readback lookup for {target_resource_id or obs_r_id} in {obs.evidence_id} "
+                        f"returned not-found / zero rows at {ts_info.state_observation_time.isoformat()} "
+                        f"(capture time: {obs.capture_time.isoformat()}, query: {query_args})."
+                    ),
                 )
+                candidates.append((ts_info.state_observation_time, check))
 
-        return None
+        if not candidates:
+            return None
+
+        # Sort by latest observation time descending
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        return candidates[0][1]
+

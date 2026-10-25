@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime
@@ -28,45 +29,111 @@ from ghost_audit.state.models import (
 from ghost_audit.state.timestamp_interpreter import SourceAwareTimestampInterpreter
 
 
-def derive_copy_type(system_id: str, source_locator: Optional[str], facts: dict[str, Any]) -> CopyType:
-    """Determine copy classification from system, locator, and fact metadata."""
-    combined = f"{system_id} {source_locator or ''} {str(facts)}".lower()
+def derive_copy_type(
+    system_id: str,
+    source_locator: Optional[str] = None,
+    facts: Optional[dict[str, Any]] = None,
+    scope_context: Optional[dict[str, Any]] = None,
+) -> tuple[CopyType, Optional[str]]:
+    """Determine copy classification and physical store identity.
+
+    Returns:
+        (CopyType, physical_store_name)
+    """
+    sys_lower = (system_id or "").lower()
+    loc_lower = (source_locator or "").lower()
+    facts_dict = facts or {}
+    scope_ctx = scope_context or {}
+
+    # Extract explicit topology
+    topo = str(scope_ctx.get("topology") or scope_ctx.get("table_topology") or facts_dict.get("topology") or "").lower()
+    combined = f"{sys_lower} {loc_lower} {topo}"
 
     if "read_replica" in combined:
-        return CopyType.READ_REPLICA
+        copy_type = CopyType.READ_REPLICA
     elif "failover_replica" in combined or "failover" in combined:
-        return CopyType.FAILOVER_REPLICA
+        copy_type = CopyType.FAILOVER_REPLICA
     elif "reporting_replica" in combined or "reporting" in combined:
-        return CopyType.REPORTING_REPLICA
+        copy_type = CopyType.REPORTING_REPLICA
     elif "replica_" in combined or "regional" in combined:
-        return CopyType.REGIONAL_REPLICA
+        copy_type = CopyType.REGIONAL_REPLICA
     elif "primary" in combined:
-        return CopyType.PRIMARY
-    elif "search" in system_id.lower() or "search" in combined:
-        return CopyType.SEARCH_INDEX
-    elif "export" in system_id.lower() or "archive" in combined:
-        return CopyType.EXPORT_ARCHIVE
-    elif "attachment" in system_id.lower() or "attachment" in combined:
-        return CopyType.SUPPORT_ATTACHMENT
-    elif "backup" in system_id.lower() or "restore" in combined:
-        return CopyType.DATABASE_BACKUP
-    elif "connector" in combined or "sync" in combined:
-        return CopyType.SYSTEM_PROCESS
-    return CopyType.PRIMARY
+        copy_type = CopyType.PRIMARY
+    elif "search" in sys_lower or "search" in loc_lower:
+        copy_type = CopyType.SEARCH_INDEX
+    elif "export" in sys_lower or "export" in loc_lower:
+        copy_type = CopyType.EXPORT_ARCHIVE
+    elif "attachment" in sys_lower or "attachment" in loc_lower:
+        copy_type = CopyType.SUPPORT_ATTACHMENT
+    elif "backup" in sys_lower or "backup" in loc_lower:
+        copy_type = CopyType.DATABASE_BACKUP
+    elif "connector" in loc_lower or "sync" in loc_lower:
+        copy_type = CopyType.SYSTEM_PROCESS
+    else:
+        copy_type = CopyType.PRIMARY
+
+    # Physical store name: remove row/page qualifiers (e.g. table:customer_data_primary:row:1 -> customer_data_primary)
+    store_name = facts_dict.get("table_name")
+    if not store_name and source_locator:
+        s = source_locator
+        s = re.sub(r':row:\d+.*$', '', s)
+        s = re.sub(r':page:\d+.*$', '', s)
+        s = re.sub(r'\[\d+\].*$', '', s)
+        if s.startswith("table:"):
+            store_name = s[len("table:"):]
+        elif s.startswith("config:"):
+            store_name = s[len("config:"):]
+        else:
+            store_name = s
+    elif not store_name:
+        store_name = f"{sys_lower}_store"
+
+    return copy_type, store_name
 
 
 def extract_field_observations(facts: dict[str, Any]) -> dict[str, FieldObservation]:
     """Extract and categorize field-level identifier and PII observations."""
     fields: dict[str, FieldObservation] = {}
     merged_facts = dict(facts)
-    record_json_str = facts.get("record_json")
-    if isinstance(record_json_str, str) and record_json_str.strip().startswith("{"):
+
+    # 1. Embedded record_json (string or dict)
+    record_json_val = facts.get("record_json")
+    if isinstance(record_json_val, str) and record_json_val.strip():
+        stripped = record_json_val.strip()
         try:
-            parsed = json.loads(record_json_str)
+            parsed = json.loads(stripped)
             if isinstance(parsed, dict):
                 merged_facts.update(parsed)
-        except Exception:
+            elif isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        merged_facts.update(item)
+        except json.JSONDecodeError:
             pass
+    elif isinstance(record_json_val, dict):
+        merged_facts.update(record_json_val)
+
+    # 2. Extract nested objects if any (e.g. user, customer, profile, data)
+    for parent_key in ["customer", "user", "profile", "data", "metadata"]:
+        parent_val = merged_facts.get(parent_key)
+        if isinstance(parent_val, dict):
+            for k, v in parent_val.items():
+                if k not in merged_facts:
+                    merged_facts[k] = v
+
+    # 3. Check free-text fields for embedded emails/phones (e.g. message, body, text, details, payload)
+    free_texts = []
+    for txt_key in ["message", "body", "details", "query", "text", "payload", "content"]:
+        if txt_key in merged_facts and isinstance(merged_facts[txt_key], str):
+            free_texts.append(merged_facts[txt_key])
+    combined_text = " ".join(free_texts)
+    if combined_text:
+        email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', combined_text)
+        if email_match and "email" not in merged_facts:
+            merged_facts["email"] = email_match.group(0)
+        phone_match = re.search(r'\+?\d{1,3}[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}', combined_text)
+        if phone_match and "phone" not in merged_facts:
+            merged_facts["phone"] = phone_match.group(0)
 
     facts = merged_facts
     is_claimed_redacted = (
@@ -322,13 +389,32 @@ class ResourceStateEngine:
             if not ts_info.is_eligible:
                 continue
 
+            facts = obs.extracted_facts or {}
+
+            # Check observation type
+            is_404 = facts.get("status_code") == 404 or facts.get("http_status") == 404
+            is_not_found = (
+                facts.get("result") in {"NOT_FOUND", "ZERO_ROWS", "EMPTY"}
+                or facts.get("rows_returned") == 0
+                or "404 Not Found" in str(facts)
+                or "not found" in str(facts.get("message", "")).lower()
+            )
+            is_negative_lookup = is_404 or is_not_found
+
+            is_pure_inventory_metadata = (
+                obs.observation_type in {"INVENTORY_SCOPE", "TABLE_INVENTORY"}
+                and "table_rows" not in facts
+                and "resource_id" not in facts
+                and not obs.resource_id
+            )
+            if is_pure_inventory_metadata:
+                continue
+
             sys_id = obs.system_id or "unknown"
             r_id = obs.resource_id or (
-                obs.extracted_facts.get("resource_id") or "unspecified_resource"
+                facts.get("resource_id") or "unspecified_resource"
             )
-            facts = obs.extracted_facts or {}
-            c_type = derive_copy_type(sys_id, obs.source_locator, facts)
-            store_loc = facts.get("table_name") or obs.source_locator
+            c_type, store_loc = derive_copy_type(sys_id, obs.source_locator, facts, obs.scope_context)
 
             copy_key = CopyKey(
                 system_id=sys_id,
@@ -340,7 +426,7 @@ class ResourceStateEngine:
             canon_key = f"{sys_id}:{r_id}"
             resource_copies_map.setdefault(canon_key, []).append(copy_str)
 
-            fields = extract_field_observations(facts)
+            fields = extract_field_observations(facts) if not is_negative_lookup else {}
             proc_st, rest_st = extract_process_and_restore_state(facts)
 
             # Determine attribution
@@ -350,16 +436,18 @@ class ResourceStateEngine:
             )
             attr = SubjectAttribution.SUPPORTED if has_matching_ident else SubjectAttribution.NOT_ESTABLISHED
 
+            observed_exist = ExistenceState.ABSENT if is_negative_lookup else ExistenceState.PRESENT
+
             # Create timeline event
             event = StateTimelineEvent(
                 event_id=f"obs_{obs.evidence_id}_{obs.source_locator or ''}",
                 event_time=ts_info.state_observation_time,
-                event_type=obs.observation_type or "OBSERVED_RECORD",
+                event_type=obs.observation_type or ("NEGATIVE_LOOKUP" if is_negative_lookup else "OBSERVED_RECORD"),
                 source_id=obs.evidence_id,
                 source_type="EVIDENCE_FILE",
                 source_locator=obs.source_locator,
                 is_claim=False,
-                observed_existence=ExistenceState.PRESENT,
+                observed_existence=observed_exist,
                 time_role_basis=ts_info.time_role_basis,
                 facts=facts,
             )
@@ -367,7 +455,7 @@ class ResourceStateEngine:
             if copy_str not in copy_assessments:
                 copy_assessments[copy_str] = CopyStateAssessment(
                     copy_key=copy_key,
-                    existence=ExistenceState.PRESENT,
+                    existence=observed_exist,
                     attribution=attr,
                     fields=fields,
                     process_state=proc_st,
@@ -381,14 +469,19 @@ class ResourceStateEngine:
                 curr.timeline.append(event)
                 if obs.evidence_id not in curr.supporting_observations:
                     curr.supporting_observations.append(obs.evidence_id)
-                # Update latest fields
-                if curr.last_observation_time is None or ts_info.state_observation_time >= curr.last_observation_time:
+                # Later observation supersedes earlier observation
+                if curr.last_observation_time is None or ts_info.state_observation_time > curr.last_observation_time:
                     curr.last_observation_time = ts_info.state_observation_time
+                    curr.existence = observed_exist
                     curr.fields.update(fields)
                     if proc_st != ProcessState.NOT_APPLICABLE:
                         curr.process_state = proc_st
                     if rest_st != RestoreState.NOT_APPLICABLE:
                         curr.restore_state = rest_st
+                elif ts_info.state_observation_time == curr.last_observation_time:
+                    if observed_exist != curr.existence:
+                        curr.existence = ExistenceState.CONFLICTED
+                        curr.conflicts.append(f"Equal-time contradictory observations at {ts_info.state_observation_time.isoformat()}: {curr.existence} vs {observed_exist}")
 
         # Process system activity claims
         for sa in packet.selected_activities:
@@ -458,8 +551,8 @@ class ResourceStateEngine:
             for inv in packet.scoped_inventories:
                 if inv.system_id == sys_id and inv.timestamp <= self.audit_at:
                     inv_facts = inv.extracted_facts or {}
-                    inv_c_type = derive_copy_type(sys_id, inv.source_locator, inv_facts)
-                    inv_store_loc = inv_facts.get("table_name") or inv.source_locator
+                    inv_c_type, inv_store_loc_derived = derive_copy_type(sys_id, inv.source_locator, inv_facts)
+                    inv_store_loc = inv_store_loc_derived or inv_facts.get("table_name") or inv.source_locator
                     inv_copy_key = CopyKey(
                         system_id=sys_id,
                         resource_id=r_id,
@@ -553,20 +646,23 @@ class ResourceStateEngine:
                     system_id=sys_id,
                     target_resource_id=r_id,
                     audit_at=self.audit_at,
+                    store_locator=assessment.copy_key.store_locator,
+                    subject_identifiers=packet.subject_identifiers,
                 )
                 if neg_lookup:
                     all_absence_checks.append(neg_lookup)
-                    ev_neg = StateTimelineEvent(
-                        event_id=f"neg_lookup_{neg_lookup.source_id}",
-                        event_time=neg_lookup.timestamp,
-                        event_type="NEGATIVE_LOOKUP",
-                        source_id=neg_lookup.source_id,
-                        source_type="OBSERVATION",
-                        source_locator=neg_lookup.source_locator,
-                        observed_existence=ExistenceState.ABSENT,
-                        time_role_basis=neg_lookup.completeness_basis,
-                    )
-                    assessment.timeline.append(ev_neg)
+                    if not any(ev.source_id == neg_lookup.source_id and ev.event_type == "NEGATIVE_LOOKUP" for ev in assessment.timeline):
+                        ev_neg = StateTimelineEvent(
+                            event_id=f"neg_lookup_{neg_lookup.source_id}",
+                            event_time=neg_lookup.timestamp,
+                            event_type="NEGATIVE_LOOKUP",
+                            source_id=neg_lookup.source_id,
+                            source_type="OBSERVATION",
+                            source_locator=neg_lookup.source_locator,
+                            observed_existence=ExistenceState.ABSENT,
+                            time_role_basis=neg_lookup.completeness_basis,
+                        )
+                        assessment.timeline.append(ev_neg)
 
                     if assessment.existence == ExistenceState.PRESENT:
                         if assessment.last_observation_time and neg_lookup.timestamp > assessment.last_observation_time:
@@ -591,18 +687,22 @@ class ResourceStateEngine:
                 # Sort copy timeline chronologically
                 assessment.timeline.sort(key=lambda ev: (ev.event_time, ev.event_id))
 
-                # Equal-time conflict check
-                times_seen: dict[datetime, list[StateTimelineEvent]] = {}
-                for ev in assessment.timeline:
-                    if not ev.is_claim and ev.observed_existence is not None:
-                        times_seen.setdefault(ev.event_time, []).append(ev)
-                for t, ev_list in times_seen.items():
-                    states = {e.observed_existence for e in ev_list}
+                # Historical conflict resolution:
+                # Disagreements unresolved AT AUDIT_AT are determined by the latest events
+                non_claim_events = [ev for ev in assessment.timeline if not ev.is_claim and ev.observed_existence is not None]
+                if non_claim_events:
+                    latest_t = max(ev.event_time for ev in non_claim_events)
+                    latest_events = [ev for ev in non_claim_events if ev.event_time == latest_t]
+                    states = {e.observed_existence for e in latest_events}
                     if len(states) > 1:
                         assessment.existence = ExistenceState.CONFLICTED
-                        conflict_msg = f"Equal-time contradictory observations at {t.isoformat()} in {c_str}: {states}"
-                        assessment.conflicts.append(conflict_msg)
-                        conflicts_detected.append(conflict_msg)
+                        conflict_msg = f"Equal-time contradictory observations at {latest_t.isoformat()} in {c_str}: {states}"
+                        if conflict_msg not in assessment.conflicts:
+                            assessment.conflicts.append(conflict_msg)
+                        if conflict_msg not in conflicts_detected:
+                            conflicts_detected.append(conflict_msg)
+                    else:
+                        assessment.existence = next(iter(states))
 
         # 3. Build ResourceStateAggregate per canonical resource
         resources: dict[str, ResourceStateAggregate] = {}
@@ -660,6 +760,7 @@ class ResourceStateEngine:
                 observed_pii_exposed=has_pii,
                 has_recreation_risk=has_recreation,
                 has_restore_risk=has_restore,
+                conflicts=[conflict for c in copies_for_resource.values() for conflict in c.conflicts],
             )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000

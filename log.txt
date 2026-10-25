@@ -982,3 +982,82 @@ branch=main
 repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=none
+
+## [2026-10-25T10:55:10.245164+00:00] SESSION START
+
+tool=Antigravity
+model=gemini-3.8-flash
+Repo Root: C:\Users\dyara\hackerrank-orchestrate-october26
+Branch: main
+Worktree: main
+Parent Agent: none
+Language: py
+Time Remaining: not configured
+
+## [2026-10-25T11:21:08.012282+00:00] Task 10: Evidence-Grounded Policy Decision Engine
+
+User Prompt (verbatim, secrets redacted):
+Implement Task 10: the evidence-grounded policy decision engine, including the focused Task 9 corrections below.
+
+Repository: C:\Users\dyara\hackerrank-orchestrate-october26
+
+Read AGENTS.md, problem_statement.md, dataset/deletion_rules.csv, and the existing input, evidence, retrieval, and state models before editing. Follow repository logging requirements. Inspect the current implementation and reuse existing services.
+
+Complete only Task 10. Do not implement the remediation planner, final case-status orchestrator, output.csv generation, or submission packaging. Do not commit or push.
+
+1. Correct the state-reconstruction defects first
+Add regression tests that demonstrate the actual bugs before fixing them.
+A. Scope negative lookups precisely.
+B. Interpret observation types before assigning existence.
+C. Repair field extraction.
+D. Make copy and timeline handling reliable.
+E. Tighten inventory absence.
+F. Keep coverage and attribution honest.
+
+2. Implement the policy engine
+Create a cohesive package such as code/ghost_audit/policy/.
+Consume loaded DeletionRule models and reconstructed state with sufficient underlying evidence. Reuse the existing DataCategory and RequiredAction enums.
+Load rules from dataset/deletion_rules.csv. Validate missing, duplicate, unsupported, or conflicting rules explicitly. Do not silently fall back to DELETE.
+Keep category identification separate from rule evaluation.
+Identify categories from grounded schema, table, artifact type, explicit facts, content, and catalog relationships. Record the supporting basis. Replace invented categories such as ACCOUNT_RECORD, SEARCH_INDEX_RECORD, DATABASE_BACKUP, SUPPORT_RECORD, and ANALYTICS_EVENT with the actual policy categories where justified.
+
+3. Return typed, inspectable assessments
+Provide per-resource and per-copy assessments containing exact identities, category, rule_id, condition evaluation, target properties, internal compliance outcome, evidence references, timestamps, missing facts, conflicts, and risks. Separate condition result from compliance.
+
+4. Implement all supplied policy semantics
+All 15 categories: DELETE categories, SUPPORT_MESSAGE, SUPPORT_ATTACHMENT, ANALYTICS_PROFILE & PRODUCT_TELEMETRY, EMAIL_DELIVERY_LOG, SECURITY_AUDIT_LOG, LEGAL_HOLD_RECORD, BACKUP_ARCHIVE, and ACCOUNT_TOMBSTONE.
+
+5. Assess process and restore risks separately
+Assess data flows and restore paths using observed configuration and grounded dependencies. Do not label successful claims as verified safe states.
+
+6. Add a diagnostic CLI
+python code/main.py assess-policy --case case_01 --sample --diagnostic --mode structured --json
+
+7. Test behavior and integration
+Add meaningful adversarial tests covering all required scenarios, verify all safe tests pass, and perform dataset inspections.
+
+Agent Response Summary:
+Corrected Task 9 state-reconstruction defects by scoping negative lookups precisely to exact resource and copy targets, accurately categorizing observation types, correctly parsing nested record_json, maintaining stable physical copy identities across row locators, and resolving historical conflicts at audit cutoff. Built the complete, modular Policy Decision Engine under code/ghost_audit/policy/ with authoritative rule catalog validation, evidence-grounded category classification replacing synthetic types, comprehensive semantics for all 15 rules, separate process/restore risk assessments, and typed inspectable assessments. Implemented the assess-policy CLI with explicit intent authorization blocking and diagnostic bypass support, authored 24 regression and integration tests (bringing the safe suite to 260 passing tests), and confirmed dataset bundle validity across both sample and evaluation datasets.
+
+Actions:
+* Created tests/test_state_defects_regression.py: 8 regression tests demonstrating Task 9 state defects prior to remediation.
+* Edited code/ghost_audit/state/inventory_checker.py: Enforced target resource and copy scope matching for negative lookups and complete inventories.
+* Edited code/ghost_audit/state/reconstruction.py: Corrected observation type interpretation, parsed nested record_json without silent suppression, separated physical stores from row locators, and handled historical conflict resolution.
+* Edited code/ghost_audit/state/models.py: Added copy conflict propagation to ResourceStateAggregate.
+* Created code/ghost_audit/policy/models.py: Strict typed models for CopyPolicyAssessment, ResourcePolicyAssessment, ProcessRiskAssessment, RestoreRiskAssessment, and CasePolicyAssessment.
+* Created code/ghost_audit/policy/rules.py: Authoritative PolicyRuleCatalog loading and validating dataset/deletion_rules.csv against duplicate, missing, or conflicting definitions.
+* Created code/ghost_audit/policy/category_classifier.py: Grounded category classifier resolving schema, table, locator, facts, and content into the 15 standard DataCategory values.
+* Created code/ghost_audit/policy/evaluator.py: Complete policy evaluator implementing all 15 rule conditions, target properties, and compliance outcomes.
+* Created code/ghost_audit/policy/service.py: PolicyDecisionEngine coordinating resource evaluations, process risks, restore risks, and overall compliance.
+* Created code/ghost_audit/policy/cli.py and updated code/ghost_audit/cli.py: Registered assess-policy subcommand supporting structured/JSON output and diagnostic bypass.
+* Created tests/test_policy_engine.py: 16 adversarial unit tests verifying all 15 rule semantics, category resolution, tombstone rules, anonymization flags, retention boundaries, restore claims, and input determinism.
+* Executed test suite: All 260 unit tests passed without failures.
+* Executed dataset inspection: python code/main.py inspect and inspect --sample both reported VALID with 0 errors.
+
+Context:
+tool=Antigravity
+model=gemini-3.8-flash
+branch=main
+repo_root=C:\Users\dyara\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none

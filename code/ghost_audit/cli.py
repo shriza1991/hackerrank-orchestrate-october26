@@ -343,6 +343,60 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Optional directory for ignored artifacts.",
     )
 
+    # assess-policy subcommand
+    assess_parser = subparsers.add_parser(
+        "assess-policy",
+        help="Evaluate reconstructed states against deletion policy rules.",
+    )
+    assess_parser.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        type=str,
+        default=None,
+        help="Target case ID to evaluate (e.g. case_01).",
+    )
+    assess_parser.add_argument(
+        "--sample",
+        action="store_true",
+        default=False,
+        help="Use sample dataset instead of full evaluation dataset.",
+    )
+    assess_parser.add_argument(
+        "--batch",
+        action="store_true",
+        default=False,
+        help="Batch process all requests in target dataset.",
+    )
+    assess_parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="Diagnostic mode: bypass intent classification for debugging.",
+    )
+    assess_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Path to dataset directory override.",
+    )
+    assess_parser.add_argument(
+        "--mode",
+        choices=["all", "structured", "multimodal"],
+        default="structured",
+        help="Ingestion mode (default: 'structured').",
+    )
+    assess_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON format.",
+    )
+    assess_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for ignored artifacts.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -412,6 +466,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         from ghost_audit.state.cli import run_reconstruct_state
 
         return run_reconstruct_state(
+            case_id=args.case_id,
+            sample=args.sample,
+            batch=args.batch,
+            diagnostic=args.diagnostic,
+            dataset_dir=args.dataset,
+            mode=args.mode,
+            json_output=args.json,
+            artifacts_dir=args.artifacts_dir,
+        )
+
+    if args.command == "assess-policy":
+        from ghost_audit.policy.cli import run_assess_policy
+
+        return run_assess_policy(
             case_id=args.case_id,
             sample=args.sample,
             batch=args.batch,
