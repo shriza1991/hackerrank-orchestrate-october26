@@ -61,3 +61,4 @@ class EvidenceIngestionSummary(BaseModel):
     total_observations: int
     by_format: dict[str, dict[str, int]] = Field(default_factory=dict)
     file_results: list[FileIngestionResult] = Field(default_factory=list)
+    manifest_errors: list[str] = Field(default_factory=list)

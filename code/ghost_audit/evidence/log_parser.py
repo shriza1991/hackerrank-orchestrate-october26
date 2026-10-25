@@ -396,7 +396,9 @@ class LogEvidenceParser:
                     "event": event_name,
                     "facts": facts,
                     "obs_type": obs_type,
+                    "direct_subject_refs": extract_subject_references(facts),
                     "subject_refs": extract_subject_references(facts),
+                    "correlation_warnings": [],
                     "raw_text": s,
                 })
                 continue
@@ -404,8 +406,14 @@ class LogEvidenceParser:
             # 8. Unrecognized line
             unparsed_fragments.append({"line_no": line_no, "raw_line": s})
 
+        # Ensure all earlier entries have direct_subject_refs and correlation_warnings
+        for ent in parsed_entries:
+            if "direct_subject_refs" not in ent:
+                ent["direct_subject_refs"] = list(ent.get("subject_refs", []))
+            if "correlation_warnings" not in ent:
+                ent["correlation_warnings"] = []
+
         # Pass 2: Trace correlation for split traces
-        # Group entries by trace key within file
         trace_map: dict[tuple[str, str], list[int]] = {}
         for idx, entry in enumerate(parsed_entries):
             tr_id = entry.get("trace_id")
@@ -415,44 +423,98 @@ class LogEvidenceParser:
                 trace_map.setdefault(tr_key, []).append(idx)
 
         for (svc, tr_id), entry_indices in trace_map.items():
-            if len(entry_indices) > 1:
-                # Find all subjects and resources across this trace
-                all_subjects: set[str] = set()
-                all_resources: set[str] = set()
-                start_lines: list[int] = []
-                end_lines: list[int] = []
+            if len(entry_indices) <= 1:
+                continue
 
-                for idx in entry_indices:
+            # Segment into discrete sequential operations where bounded by start / completion events
+            segments: list[list[int]] = []
+            curr_seg: list[int] = []
+            for idx in entry_indices:
+                ent = parsed_entries[idx]
+                ev = (ent.get("event") or "").lower()
+                is_start = "start" in ev
+                has_completion = any(
+                    ("completed" in (parsed_entries[i].get("event") or "").lower() or
+                     "finish" in (parsed_entries[i].get("event") or "").lower() or
+                     "result" in (parsed_entries[i].get("event") or "").lower())
+                    for i in curr_seg
+                )
+                if curr_seg and has_completion and is_start:
+                    segments.append(curr_seg)
+                    curr_seg = [idx]
+                else:
+                    curr_seg.append(idx)
+            if curr_seg:
+                segments.append(curr_seg)
+
+            for seg in segments:
+                # Direct subjects present in this segment
+                seg_subjects: set[str] = set()
+                seg_resources: set[str] = set()
+                start_entries: list[dict[str, Any]] = []
+                end_entries: list[dict[str, Any]] = []
+
+                for idx in seg:
                     ent = parsed_entries[idx]
-                    all_subjects.update(ent["subject_refs"])
+                    seg_subjects.update(ent["direct_subject_refs"])
                     if ent["resource_id"]:
-                        all_resources.add(ent["resource_id"])
+                        seg_resources.add(ent["resource_id"])
                     ev = (ent.get("event") or "").lower()
                     if "start" in ev:
-                        start_lines.append(ent["line_no"])
+                        start_entries.append(ent)
                     elif "completed" in ev or "finish" in ev or "result" in ev:
-                        end_lines.append(ent["line_no"])
+                        end_entries.append(ent)
 
-                # Detect potential trace collisions (multiple disparate subjects in same trace ID)
-                if len(all_subjects) > 2:
-                    warnings.append(
-                        f"Potential trace ID collision for {tr_id} in service {svc}: multiple subjects found {sorted(all_subjects)}"
+                # Two or more conflicting subjects in the same segment -> AMBIGUOUS collision
+                if len(seg_subjects) >= 2:
+                    warn_msg = (
+                        f"Trace collision on {tr_id} in service {svc}: conflicting subjects {sorted(seg_subjects)}. "
+                        "Correlation marked ambiguous."
                     )
+                    warnings.append(warn_msg)
+                    for idx in seg:
+                        ent = parsed_entries[idx]
+                        ent["facts"]["correlation_ambiguous"] = True
+                        ent["correlation_warnings"].append(warn_msg)
+                        # Retain only direct subject references, do NOT cross-pollinate
+                        ent["subject_refs"] = list(ent["direct_subject_refs"])
+                        ent["facts"]["direct_subject_references"] = list(ent["direct_subject_refs"])
+                    continue
 
-                # Correlate across split trace entries
-                for idx in entry_indices:
-                    ent = parsed_entries[idx]
-                    # Link subject references from other entries in the trace
-                    for sub in all_subjects:
-                        if sub not in ent["subject_refs"]:
-                            ent["subject_refs"].append(sub)
-                    # Link resource ID if missing on start event
-                    if not ent["resource_id"] and len(all_resources) == 1:
-                        ent["facts"]["correlated_resource_id"] = next(iter(all_resources))
-                    if start_lines:
-                        ent["facts"]["correlated_trace_start_line"] = start_lines[0]
-                    if end_lines:
-                        ent["facts"]["correlated_trace_end_line"] = end_lines[-1]
+                # Exactly one subject in this segment -> Unambiguous split trace correlation
+                if len(seg_subjects) == 1:
+                    unambiguous_sub = next(iter(seg_subjects))
+                    start_ent = next((parsed_entries[i] for i in seg if unambiguous_sub in parsed_entries[i]["direct_subject_refs"]), None)
+                    start_locator = f"line:{start_ent['line_no']}" if start_ent else None
+                    start_ts = start_ent['timestamp'] if start_ent else None
+
+                    for idx in seg:
+                        ent = parsed_entries[idx]
+                        ent["subject_refs"] = [unambiguous_sub]
+                        ent["facts"]["direct_subject_references"] = list(ent["direct_subject_refs"])
+                        if unambiguous_sub not in ent["direct_subject_refs"]:
+                            ent["facts"]["correlated_subject_reference"] = unambiguous_sub
+                            if start_locator:
+                                ent["facts"]["correlated_subject_locator"] = start_locator
+                            if start_ts:
+                                ent["facts"]["correlated_subject_timestamp"] = start_ts.isoformat()
+                        if not ent["resource_id"] and len(seg_resources) == 1:
+                            ent["facts"]["correlated_resource_id"] = next(iter(seg_resources))
+                        if start_entries:
+                            ent["facts"]["correlated_trace_start_line"] = start_entries[0]["line_no"]
+                        if end_entries:
+                            ent["facts"]["correlated_trace_end_line"] = end_entries[-1]["line_no"]
+                else:
+                    # 0 subjects in this segment
+                    for idx in seg:
+                        ent = parsed_entries[idx]
+                        ent["facts"]["direct_subject_references"] = []
+                        if not ent["resource_id"] and len(seg_resources) == 1:
+                            ent["facts"]["correlated_resource_id"] = next(iter(seg_resources))
+                        if start_entries:
+                            ent["facts"]["correlated_trace_start_line"] = start_entries[0]["line_no"]
+                        if end_entries:
+                            ent["facts"]["correlated_trace_end_line"] = end_entries[-1]["line_no"]
 
         # Pass 3: Construct EvidenceObservation objects
         observations: list[EvidenceObservation] = []
@@ -471,7 +533,7 @@ class LogEvidenceParser:
                     resource_id=ent["resource_id"],
                     extracted_facts=ent["facts"],
                     extraction_method=self.parser_name,
-                    uncertainty_or_warnings=[],
+                    uncertainty_or_warnings=list(ent.get("correlation_warnings", [])),
                     internal_id=make_observation_id(file_id, obs_idx),
                     file_path=file_path,
                     observation_type=ent["obs_type"],

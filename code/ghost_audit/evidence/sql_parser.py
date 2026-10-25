@@ -33,25 +33,65 @@ BLOCKED_SQL_PATTERNS = [
 ]
 
 
-def derive_system_id_from_table(table_name: str, default_origin: str) -> str:
-    """Infer the system identity from the table name convention."""
+# Actions permitted in SQLite execution sandbox
+ALLOWED_SQLITE_ACTIONS = {
+    sqlite3.SQLITE_SELECT,
+    sqlite3.SQLITE_READ,
+    sqlite3.SQLITE_INSERT,
+    sqlite3.SQLITE_UPDATE,
+    sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_CREATE_TABLE,
+    sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_REINDEX,
+}
+
+ALLOWED_SQLITE_PRAGMAS = {
+    "foreign_keys",
+    "table_info",
+    "database_list",
+}
+
+
+def safe_sqlite_authorizer(action_code: int, arg1: Optional[str], arg2: Optional[str], db_name: Optional[str], trigger_name: Optional[str]) -> int:
+    """Execution-level SQLite authorizer allowlist blocking filesystem access and unsafe directives."""
+    if action_code in ALLOWED_SQLITE_ACTIONS:
+        return sqlite3.SQLITE_OK
+    if action_code == sqlite3.SQLITE_FUNCTION:
+        # Allow standard SQL functions (LIKE, COUNT, etc.) but block extension loading
+        if arg2 and arg2.lower() in {"load_extension", "fts3_tokenizer"}:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    if action_code == sqlite3.SQLITE_PRAGMA:
+        if arg1 and arg1.lower() in ALLOWED_SQLITE_PRAGMAS:
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+    # Block ATTACH, DETACH, VACUUM (including VACUUM INTO), LOAD_EXTENSION, etc.
+    return sqlite3.SQLITE_DENY
+
+
+def derive_system_id_from_table(table_name: str, default_origin: Optional[str] = None) -> Optional[str]:
+    """Infer the system identity using specific table name conventions before generic fallbacks."""
     tbl_lower = table_name.lower()
-    if "profile" in tbl_lower or "account" in tbl_lower:
-        return "account_service"
-    elif "search" in tbl_lower:
-        return "search_service"
-    elif "analytics" in tbl_lower:
+    # Check specific subsystem names first
+    if "analytics" in tbl_lower:
         return "analytics_platform"
-    elif "support" in tbl_lower:
+    if "search" in tbl_lower:
+        return "search_service"
+    if "support" in tbl_lower or "ticket" in tbl_lower:
         return "support_platform"
-    elif "export" in tbl_lower:
+    if "export" in tbl_lower:
         return "export_service"
-    elif "connector" in tbl_lower:
+    if "connector" in tbl_lower or "data_flow" in tbl_lower or "integration" in tbl_lower:
         return "integration_service"
-    elif "backup" in tbl_lower:
+    if "backup" in tbl_lower or "restore" in tbl_lower:
         return "backup_service"
-    elif "audit" in tbl_lower or "security" in tbl_lower:
+    if "audit" in tbl_lower or "security" in tbl_lower or "auth" in tbl_lower:
         return "security_service"
+    if "customer_profiles" in tbl_lower or "customer_data" in tbl_lower or "account" in tbl_lower or "profile" in tbl_lower or "identit" in tbl_lower:
+        return "account_service"
     return default_origin
 
 
@@ -73,7 +113,7 @@ class SqlEvidenceParser:
         """Execute and inspect SQL snapshot in an isolated in-memory SQLite database."""
         content_digest = compute_content_digest(content)
 
-        # Check for blocked unsafe operations
+        # Check for blocked unsafe operations in text as fast check
         for pattern in BLOCKED_SQL_PATTERNS:
             if pattern.search(content):
                 return FileIngestionResult(
@@ -103,9 +143,9 @@ class SqlEvidenceParser:
             except Exception:
                 pass
 
-        topology_label = topology_match.group(1).strip() if topology_match else None
+        file_topology_label = topology_match.group(1).strip() if topology_match else None
 
-        # Execute in memory
+        # Execute in memory with bounded opcodes and authorizer restrictions
         step_counter = [0]
 
         def progress_handler():
@@ -117,9 +157,10 @@ class SqlEvidenceParser:
         conn = None
         try:
             conn = sqlite3.connect(":memory:", uri=False)
+            conn.set_authorizer(safe_sqlite_authorizer)
             conn.set_progress_handler(progress_handler, 1000)
             conn.executescript(content)
-        except sqlite3.Error as e:
+        except (sqlite3.Error, sqlite3.DatabaseError) as e:
             if conn:
                 conn.close()
             return FileIngestionResult(
@@ -166,26 +207,39 @@ class SqlEvidenceParser:
 
                 table_sys_id = derive_system_id_from_table(table_name, origin)
 
-                # Determine table topology role from name if not globally set
-                table_topology = topology_label
-                if not table_topology:
-                    if "failover" in table_name:
-                        table_topology = "failover_replica"
-                    elif "read_replica" in table_name:
-                        table_topology = "read_replica"
-                    elif "regional" in table_name or "replica_" in table_name:
-                        table_topology = "regional_replica"
-                    elif "reporting" in table_name:
-                        table_topology = "reporting_replica"
-                    elif "primary" in table_name:
-                        table_topology = "primary"
+                # Determine table topology role: explicit table role takes precedence over file role
+                tbl_lower = table_name.lower()
+                table_region = None
+                if "replica_ap_south" in tbl_lower or "ap_south" in tbl_lower:
+                    table_region = "ap-south"
+                elif "replica_eu_west" in tbl_lower or "eu_west" in tbl_lower:
+                    table_region = "eu-west"
+
+                if "primary" in tbl_lower:
+                    table_topology = "primary"
+                elif "failover" in tbl_lower:
+                    table_topology = "failover_replica"
+                elif "read_replica" in tbl_lower or ("read" in tbl_lower and "replica" in tbl_lower):
+                    table_topology = "read_replica"
+                elif file_topology_label:
+                    table_topology = file_topology_label
+                elif "regional" in tbl_lower or "replica_" in tbl_lower:
+                    table_topology = "regional_replica"
+                elif "reporting" in tbl_lower:
+                    table_topology = "reporting_replica"
+                else:
+                    table_topology = "primary"
 
                 table_scope_ctx = {
                     "table_name": table_name,
                     "topology": table_topology,
+                    "table_topology": table_topology,
+                    "file_topology": file_topology_label,
                     "columns": col_names,
                     "row_count": row_count,
                 }
+                if table_region:
+                    table_scope_ctx["region"] = table_region
 
                 # 1. Emit INVENTORY_SCOPE observation for the table
                 obs_idx += 1
@@ -245,8 +299,12 @@ class SqlEvidenceParser:
                         row_scope_ctx = {
                             "table_name": table_name,
                             "topology": table_topology,
+                            "table_topology": table_topology,
+                            "file_topology": file_topology_label,
                             "row_index": r_idx,
                         }
+                        if table_region:
+                            row_scope_ctx["region"] = table_region
 
                         observations.append(
                             EvidenceObservation(

@@ -221,6 +221,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Print detailed per-file status breakdown.",
     )
+    evidence_parser.add_argument(
+        "--mode",
+        choices=["all", "structured", "multimodal"],
+        default="all",
+        help="Ingestion mode: 'all' (default, all 94 files), 'structured' (79 files), or 'multimodal' (15 files).",
+    )
+    evidence_parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Authorize optional live vision model calls (default False).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -265,6 +276,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_evidence_ingestion(
             dataset_dir=args.dataset,
             file_id=args.file,
+            mode=args.mode,
+            live=args.live,
             as_json=args.json,
             artifacts_dir=args.artifacts_dir,
             detailed_report=args.report,
