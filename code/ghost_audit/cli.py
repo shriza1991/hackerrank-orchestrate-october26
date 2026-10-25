@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from ghost_audit.config import EXPECTED_COUNTS, Settings, get_settings
 from ghost_audit.loader import DataLoader
+from ghost_audit.llm.smoke import run_smoke
 
 
 def inspect_dataset(
@@ -138,6 +139,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Output machine-readable JSON format.",
     )
+    smoke_parser = subparsers.add_parser(
+        "model-smoke", help="Check model configuration or run an explicitly authorized synthetic call."
+    )
+    smoke_parser.add_argument(
+        "--live", action="store_true",
+        help="Explicitly authorize one potentially paid synthetic model request.",
+    )
+    smoke_parser.add_argument(
+        "--report", action="store_true",
+        help="Write development accounting to ignored artifacts/model-smoke-usage.md.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -151,6 +163,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(format_text_summary(summary))
 
         return 0 if summary["status"] == "VALID" else 1
+
+    if args.command == "model-smoke":
+        return run_smoke(live=args.live, write_report=args.report)
 
     return 0
 

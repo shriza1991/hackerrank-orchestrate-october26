@@ -249,3 +249,80 @@ Exit code `0` means evaluation completed and prediction coverage/contract are
 valid, even if accuracy is below 100%. Exit `1` means prediction contract or
 coverage failed. Exit `2` means an input is unusable, including a malformed
 reference. No API key, model, network access, or prediction pipeline is needed.
+
+---
+
+## Model Gateway and Usage Tracking (Task 3)
+
+Task 3 adds a provider-neutral structured-call gateway under
+`code/ghost_audit/llm/` and one OpenAI Responses API transport. Imports,
+inspection, evaluation, and offline tests do not require credentials.
+
+### Configuration
+
+Copy `.env.example` as a reference and set variables in the process environment;
+the project deliberately does not load or commit `.env` files.
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `GHOST_AUDIT_API_KEY` | Provider credential (`OPENAI_API_KEY` is a fallback) | unset |
+| `GHOST_AUDIT_MODEL` | Exact requested model identifier | unset |
+| `GHOST_AUDIT_API_BASE_URL` | OpenAI-compatible API root | `https://api.openai.com/v1` |
+| `GHOST_AUDIT_PROVIDER` | Provider label used in records | `openai` |
+| `GHOST_AUDIT_REQUEST_TIMEOUT` | Per-attempt timeout in seconds | `30` |
+| `GHOST_AUDIT_MAX_ATTEMPTS` | Total attempts, bounded from 1 to 10 | `3` |
+| `GHOST_AUDIT_INITIAL_BACKOFF` | Initial exponential backoff seconds | `0.5` |
+| `GHOST_AUDIT_MAX_BACKOFF` | Maximum permitted retry delay | `8` |
+| `GHOST_AUDIT_CACHE_ENABLED` | Enable validated-response caching | `true` |
+| `GHOST_AUDIT_CACHE_DIR` | Ignored cache location | `.cache/ghost_audit_llm` |
+| `GHOST_AUDIT_INPUT_PRICE_PER_MILLION` | Optional input-token price estimate | unavailable |
+| `GHOST_AUDIT_OUTPUT_PRICE_PER_MILLION` | Optional output-token price estimate | unavailable |
+| `GHOST_AUDIT_MAX_OUTPUT_TOKENS` | Optional positive output limit | unset |
+
+Prices are never guessed. Both prices and provider token totals must be present
+for cost estimates; otherwise cost is reported as unavailable.
+
+### Synthetic smoke command
+
+An offline check is the default and makes no network request:
+
+```bash
+python code/main.py model-smoke
+```
+
+A potentially paid synthetic request requires explicit authorization:
+
+```bash
+python code/main.py model-smoke --live
+python code/main.py model-smoke --live --report
+```
+
+The report flag writes development-only accounting to the ignored
+`artifacts/model-smoke-usage.md`; it never overwrites the final
+`code/evaluation/usage_report.md`. Repeating an identical successful request
+uses the cache when enabled and records zero new API calls for that cache hit.
+
+### Validation, retries, cache, and accounting
+
+- The adapter requests strict JSON Schema output and locally revalidates the
+  raw response with Pydantic. Invalid JSON, missing/extra fields, wrong types,
+  empty output, refusals, and truncation are failures and are never repaired.
+- Authentication, configuration, and ordinary client failures are not retried.
+  Timeouts, connections, temporary rate limits, and server failures use bounded
+  exponential backoff. Provider `Retry-After` is respected only within the
+  configured maximum; larger delays stop the call for later handling.
+- Cache keys cover endpoint identity, provider/model, task/template, messages,
+  schema, generation parameters, and output limit. Credentials are excluded.
+  Only validated successes are atomically cached, and cached content is
+  revalidated. Corrupt or incompatible entries fail explicitly.
+- Every attempt gets a machine-readable usage record. Actual provider token
+  totals are retained for successful and schema-invalid responses and retries;
+  unavailable usage remains unknown. Cached/reasoning token breakdowns remain
+  subsets of provider totals and are not double-counted. Cache-reused logical
+  tokens are reported separately from newly billed tokens.
+
+The transport follows the official OpenAI guidance for
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
+and [API error handling](https://developers.openai.com/api/docs/guides/error-codes).
+Task 3 contains no intent classifier, evidence processing, deletion decisions,
+or dataset prediction logic.
