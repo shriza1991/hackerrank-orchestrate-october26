@@ -214,3 +214,38 @@ python -m pytest -v
 
 Task 1 performs inspection and contract validation only. It makes no model calls,
 does not generate predictions, and does not modify the supplied dataset.
+
+---
+
+## Evaluation Framework (Task 2)
+
+Evaluate an explicit prediction file against the 32 public reference answers:
+
+```bash
+python code/evaluation/main.py --predictions path/to/predictions.csv
+```
+
+The reference and request defaults resolve from the repository regardless of
+the current working directory. They can be overridden, and a detailed Markdown
+report or machine-readable JSON can be requested:
+
+```bash
+python code/evaluation/main.py \
+  --predictions path/to/predictions.csv \
+  --reference dataset/sample_output.csv \
+  --requests dataset/sample_deletion_requests.csv \
+  --report code/evaluation/evaluation_report.md \
+  --json
+```
+
+The evaluator reports status and exact-row accuracy, multiset step precision /
+recall / F1, positional field accuracy, sequence accuracy, coverage, contract
+violations, and per-case diagnostics. It retains raw JSON for comparison and
+does not sort, renumber, coerce, fill, or deduplicate malformed predictions.
+Reference answers are loaded only by the independent `evaluation` package;
+`ghost_audit` does not import evaluator code.
+
+Exit code `0` means evaluation completed and prediction coverage/contract are
+valid, even if accuracy is below 100%. Exit `1` means prediction contract or
+coverage failed. Exit `2` means an input is unusable, including a malformed
+reference. No API key, model, network access, or prediction pipeline is needed.
