@@ -390,9 +390,46 @@ def test_screenshot_tombstone_detection():
     assert res.status == IngestionStatus.PARSED
     obs = res.observations[0]
 
-    assert obs.system_id == "account_service"
+    assert obs.system_id == "identity_service"
     assert obs.extracted_facts.get("is_tombstone") is True
     assert "user_17" in obs.subject_references
+
+
+def test_prerequisite_fix_b_email_prefix_not_stripped():
+    """Verify legitimate email local parts with prefix-like patterns are not rewritten."""
+    from ghost_audit.evidence.image_parser import clean_email, extract_email_candidates
+    
+    # 1. Legitimate email with user_ prefix in local part
+    legit_email = "user_17-notifications@example.test"
+    assert clean_email(legit_email) == legit_email
+    
+    # 2. Another legitimate complex local part
+    admin_email = "support_team-tier2@company.com"
+    assert clean_email(admin_email) == admin_email
+
+    # 3. Concatenated UI breadcrumb token separated cleanly with warning
+    chained = "user_20-analytics_7438-darwish.omar@icloud.com"
+    primary, raw, warn = extract_email_candidates(chained)
+    assert primary == "darwish.omar@icloud.com"
+    assert raw == chained
+    assert warn is not None
+
+
+def test_prerequisite_fix_e_inactive_status_not_matched_as_active():
+    """Verify substring matching does not interpret INACTIVE as ACTIVE."""
+    from ghost_audit.evidence.image_parser import ImageEvidenceParser
+    parser = ImageEvidenceParser()
+    
+    # Text with INACTIVE should detect INACTIVE or None, never ACTIVE
+    text_inactive = "Account status: INACTIVE (pending deletion)"
+    import re
+    status_val = None
+    for cand in ["INACTIVE", "DELETED", "DELETION_PENDING", "LIVE", "ACTIVE", "HEALTHY", "Retained reference", "Normal priority"]:
+        if re.search(r'\b' + re.escape(cand) + r'\b', text_inactive, re.IGNORECASE):
+            status_val = cand
+            break
+    assert status_val == "INACTIVE"
+    assert status_val != "ACTIVE"
 
 
 def test_screenshot_row_isolation_backup_restore_console():

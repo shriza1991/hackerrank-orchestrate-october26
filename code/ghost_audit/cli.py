@@ -233,6 +233,64 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Authorize optional live vision model calls (default False).",
     )
 
+    # Subcommand: retrieve-evidence
+    retrieve_parser = subparsers.add_parser(
+        "retrieve-evidence",
+        help="Retrieve grounded evidence and system activity for deletion audit cases.",
+    )
+    retrieve_parser.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        type=str,
+        default=None,
+        help="Specific case_id to retrieve (e.g. case_01).",
+    )
+    retrieve_parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Target sample deletion requests instead of evaluation set.",
+    )
+    retrieve_parser.add_argument(
+        "--batch",
+        action="store_true",
+        default=False,
+        help="Batch process all requests in target dataset.",
+    )
+    retrieve_parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="Diagnostic mode: bypass intent classification for debugging.",
+    )
+    retrieve_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Path to dataset directory override.",
+    )
+    retrieve_parser.add_argument(
+        "--mode",
+        choices=["all", "structured", "multimodal"],
+        default="all",
+        help="Ingestion mode (default: 'all').",
+    )
+    retrieve_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON packet format.",
+    )
+    retrieve_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Optional directory to write case evidence packet JSON files.",
+    )
+    retrieve_parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print detailed diagnostic reporting.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -281,6 +339,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             as_json=args.json,
             artifacts_dir=args.artifacts_dir,
             detailed_report=args.report,
+        )
+
+    if args.command == "retrieve-evidence":
+        from ghost_audit.retrieval.cli import run_evidence_retrieval
+
+        return run_evidence_retrieval(
+            case_id=args.case_id,
+            sample=args.sample,
+            batch=args.batch,
+            diagnostic=args.diagnostic,
+            dataset_dir=args.dataset,
+            mode=args.mode,
+            json_output=args.json,
+            artifacts_dir=args.artifacts_dir,
+            write_report=args.report,
         )
 
     return 0

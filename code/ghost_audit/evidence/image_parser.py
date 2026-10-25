@@ -24,14 +24,14 @@ PARSER_VERSION = "1.0.0"
 ORIGIN_SYSTEM_MAP = {
     "account_admin_portal": "account_service",
     "account_history_service": "account_service",
-    "identity_service": "account_service",
+    "identity_service": "identity_service",
     "legal_retention_service": "account_service",
     "search_index_admin": "search_service",
     "integration_admin": "integration_service",
     "analytics_platform": "analytics_platform",
-    "marketing_platform": "analytics_platform",
+    "marketing_platform": "marketing_platform",
     "export_service": "export_service",
-    "object_storage": "export_service",
+    "object_storage": "object_storage",
     "support_platform": "support_platform",
     "customer_support_service": "support_platform",
     "backup_service": "backup_service",
@@ -50,36 +50,59 @@ RESOURCE_ID_PATTERN = re.compile(
 
 
 def select_primary_resource_id(resource_ids: list[str], system_id: str) -> Optional[str]:
-    """Select the primary resource ID matching the system role."""
+    """Select the primary resource ID matching the system role, or None if not established."""
     if not resource_ids:
         return None
     pref_map = {
         "account_service": ["account_"],
+        "identity_service": ["account_"],
         "integration_service": ["data_flow_"],
         "backup_service": ["backup_"],
         "export_service": ["export_"],
         "search_service": ["search_"],
         "security_service": ["audit_record_", "CJX-"],
         "support_platform": ["support_", "CS-"],
-        "analytics_platform": ["analytics_", "marketing_"],
+        "analytics_platform": ["analytics_"],
+        "marketing_platform": ["marketing_"],
+        "object_storage": ["export_", "archive_"],
     }
     prefixes = pref_map.get(system_id, [])
     for pfx in prefixes:
         for rid in resource_ids:
             if rid.startswith(pfx):
                 return rid
-    return resource_ids[0]
+    # If no resource ID matches the system role, leave it unknown
+    return None
+
+
+def extract_email_candidates(candidate: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Extract email without rewriting valid email local parts.
+
+    Returns (primary_email, raw_token, uncertainty_warning).
+    """
+    cand = candidate.strip()
+    match = EMAIL_PATTERN.search(cand)
+    if not match:
+        return cand, None, None
+    raw_email = match.group(0)
+
+    # Check for chained UI breadcrumbs (e.g. user_20-analytics_7438-darwish.omar@icloud.com)
+    chained_match = re.match(
+        r'^(?:user_\w+|analytics_\w+|marketing_\w+|account_\w+|support_\w+)[-_]+(?:analytics_\w+|support_\w+|data_flow_\w+)[-_]+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)$',
+        raw_email,
+    )
+    if chained_match:
+        sep_email = chained_match.group(1)
+        return sep_email, raw_email, f"Concatenated OCR token '{raw_email}' separated to '{sep_email}'"
+
+    # Single prefix like user_17-notifications@example.test is a legitimate email - DO NOT STRIP
+    return raw_email, None, None
 
 
 def clean_email(candidate: str) -> str:
-    """Strip system prefixes like user_20- or marketing_001- from OCR-extracted emails."""
-    match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', candidate)
-    if not match:
-        return candidate
-    val = match.group(0)
-    # Strip resource or user prefix before email if present (e.g. user_20-analytics_7438-darwish.omar@icloud.com)
-    val = re.sub(r'^(?:user_\w+-|analytics_\w+-|marketing_\w+-|account_\w+-|support_\w+-)+', '', val)
-    return val
+    """Backward-compatible helper returning the primary email address."""
+    primary, _, _ = extract_email_candidates(candidate)
+    return primary
 
 
 def parse_human_readable_date(text: str) -> Optional[datetime]:
@@ -116,8 +139,14 @@ class ImageEvidenceParser:
         self._ocr_instance: Any = None
 
     def _get_ocr(self) -> Any:
-        """Lazy initialization of RapidOCR engine."""
+        """Lazy initialization of RapidOCR engine with telemetry disabled for strict offline execution."""
         if self._ocr_instance is None:
+            import os
+            os.environ["ORT_TELEMETRY"] = "0"
+            os.environ["ONNXRUNTIME_TELEMETRY"] = "0"
+            os.environ["DISABLE_ORT_TELEMETRY"] = "1"
+            os.environ["AZURE_CORE_COLLECT_TELEMETRY"] = "0"
+            os.environ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"
             from rapidocr_onnxruntime import RapidOCR
             self._ocr_instance = RapidOCR()
         return self._ocr_instance
@@ -222,8 +251,9 @@ class ImageEvidenceParser:
                 content_digest=content_digest,
             )
 
-        # Parse OCR items: filter low confidence
+        # Parse OCR items: retain low-confidence tokens with warnings rather than silently dropping
         parsed_boxes: list[dict[str, Any]] = []
+        low_confidence_tokens: list[dict[str, Any]] = []
         full_text_lines: list[str] = []
         all_x: list[float] = []
         all_y: list[float] = []
@@ -231,8 +261,6 @@ class ImageEvidenceParser:
         for item in ocr_result:
             box, text, score = item
             score_f = float(score)
-            if score_f < 0.40:
-                continue
             text_str = text.strip()
             if not text_str:
                 continue
@@ -242,6 +270,15 @@ class ImageEvidenceParser:
             y_coords = [p[1] for p in box]
             min_x, max_x = min(x_coords), max(x_coords)
             min_y, max_y = min(y_coords), max(y_coords)
+
+            if score_f < 0.40:
+                low_confidence_tokens.append({
+                    "text": text_str,
+                    "score": score_f,
+                    "bbox": [int(min_x), int(min_y), int(max_x), int(max_y)],
+                })
+                warnings.append(f"Low-confidence OCR token: '{text_str}' (confidence={score_f:.2f})")
+                continue
 
             all_x.extend([min_x, max_x])
             all_y.extend([min_y, max_y])
@@ -381,6 +418,7 @@ class ImageEvidenceParser:
                             "phones": d_phones,
                             "user_ids": d_users,
                             "resource_ids": d_resources,
+                            "raw_text": detail_text.strip(),
                             "detail_text_excerpt": detail_text[:400].strip(),
                         },
                         extraction_method=self.parser_name,
@@ -411,10 +449,10 @@ class ImageEvidenceParser:
             # Detect tombstone / retained reference pattern (e.g. deleted_account_reference)
             is_tombstone = "retained reference" in full_text.lower() or "customerkey" in full_text.lower()
 
-            # Detect statuses
+            # Detect statuses using strict word boundaries (so INACTIVE is not matched as ACTIVE)
             status_val = None
-            for cand in ["LIVE", "ACTIVE", "HEALTHY", "Retained reference", "Normal priority", "DELETED", "DELETION_PENDING"]:
-                if cand.lower() in full_text.lower():
+            for cand in ["INACTIVE", "DELETED", "DELETION_PENDING", "LIVE", "ACTIVE", "HEALTHY", "Retained reference", "Normal priority"]:
+                if re.search(r'\b' + re.escape(cand) + r'\b', full_text, re.IGNORECASE):
                     status_val = cand
                     break
 
@@ -427,9 +465,12 @@ class ImageEvidenceParser:
                 "emails": emails,
                 "phones": phones,
                 "resource_ids": resource_ids,
+                "linked_resources": resource_ids,
                 "is_tombstone": is_tombstone,
                 "visible_status": status_val,
+                "raw_text": full_text.strip(),
                 "full_text_excerpt": full_text[:500].strip(),
+                "low_confidence_tokens": low_confidence_tokens,
                 "bounding_boxes_summary": f"{len(parsed_boxes)} OCR regions detected",
             }
 

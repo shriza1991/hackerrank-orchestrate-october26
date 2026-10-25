@@ -338,6 +338,8 @@ class PdfEvidenceParser:
             "phones": phones,
             "user_ids": user_ids,
             "resource_ids": resource_ids,
+            "linked_resources": resource_ids,
+            "raw_text": page_text.strip(),
             "page_text_excerpt": page_text[:400].strip(),
         }
         if customer_name:
