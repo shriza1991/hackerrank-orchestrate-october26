@@ -247,7 +247,7 @@ def test_sanitized_record_linked_through_prior_resource(sample_user_bundle):
 
     pkt = retrieval_svc.retrieve_for_case(req, diagnostic_mode=True)
     assert "account_service:account_77" in pkt.grounded_resources
-    assert "account_service:analytics_99" in pkt.grounded_resources
+    assert "analytics_platform:analytics_99" in pkt.grounded_resources
     assert len(pkt.selected_observations) == 2
 
 
@@ -468,7 +468,7 @@ def test_cycle_detection_and_expansion_limits(sample_user_bundle):
 
     pkt = retrieval_svc.retrieve_for_case(req, diagnostic_mode=True)
     assert "service_a:res_A" in pkt.grounded_resources
-    assert "service_a:res_B" in pkt.grounded_resources
+    assert "service_b:res_B" in pkt.grounded_resources
     assert len(pkt.diagnostics.cycles_detected) >= 1
     assert len(pkt.selected_observations) == 2
 

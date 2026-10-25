@@ -163,13 +163,19 @@ def run_evidence_retrieval(
     )
 
     intent_svc: Optional[IntentClassificationService] = None
-    if not diagnostic:
-        intent_svc = IntentClassificationService()
+    # Live model calls require explicit authorization; when offline or without gateway, intent_svc remains None
+
+    failed_files = [fr.file_id for fr in summary.file_results if getattr(fr.status, "value", str(fr.status)) == "FAILED"]
+    deferred_files = [fr.file_id for fr in summary.file_results if getattr(fr.status, "value", str(fr.status)) == "DEFERRED"]
+    manifest_errors = [str(err) for err in summary.manifest_errors]
 
     retrieval_svc = EvidenceRetrievalService(
         index=corpus_index,
         identity_service=identity_svc,
         intent_service=intent_svc,
+        failed_files=failed_files,
+        deferred_files=deferred_files,
+        manifest_errors=manifest_errors,
     )
 
     # Select target requests

@@ -178,10 +178,6 @@ class CorpusIndex:
                     self.activity_by_system_resource.setdefault(
                         (act.target_system.strip(), r_id), []
                     ).append(act)
-                if act.source_system and act.source_system != act.target_system:
-                    self.activity_by_system_resource.setdefault(
-                        (act.source_system.strip(), r_id), []
-                    ).append(act)
 
             if act.event_type == "LINK_RESOURCE_IDENTITY":
                 entry = parse_catalog_link(act)
@@ -291,10 +287,11 @@ class CorpusIndex:
         """Lookup observations matching a resource key at or before cutoff."""
         res_id = resource_id.strip()
         candidates: list[EvidenceObservation] = []
-        if system_id:
+        if system_id and system_id != "unknown":
             candidates.extend(self.obs_by_system_resource.get((system_id.strip(), res_id), []))
-        candidates.extend(self.obs_by_resource.get(res_id, []))
-        candidates.extend(self.obs_by_alias.get(res_id, []))
+        else:
+            candidates.extend(self.obs_by_resource.get(res_id, []))
+            candidates.extend(self.obs_by_alias.get(res_id, []))
 
         results = _dedup_obs(candidates)
         if cutoff is not None:
@@ -345,9 +342,10 @@ class CorpusIndex:
         """Lookup system activity events acting on a grounded resource at or before cutoff."""
         res_id = resource_id.strip()
         candidates: list[SystemActivityEvent] = []
-        if system_id:
+        if system_id and system_id != "unknown":
             candidates.extend(self.activity_by_system_resource.get((system_id.strip(), res_id), []))
-        candidates.extend(self.activity_by_resource.get(res_id, []))
+        else:
+            candidates.extend(self.activity_by_resource.get(res_id, []))
 
         results = _dedup_acts(candidates)
         if cutoff is not None:

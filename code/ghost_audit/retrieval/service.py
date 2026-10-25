@@ -24,16 +24,23 @@ class EvidenceRetrievalService:
         identity_service: IdentityResolutionService,
         intent_service: Optional[IntentClassificationService] = None,
         max_depth: int = 5,
+        failed_files: Sequence[str] = (),
+        deferred_files: Sequence[str] = (),
+        manifest_errors: Sequence[str] = (),
     ) -> None:
         self.index = index
         self.identity_service = identity_service
         self.intent_service = intent_service
+        self.failed_files = list(failed_files)
+        self.deferred_files = list(deferred_files)
+        self.manifest_errors = list(manifest_errors)
         self.linker = EvidenceLinker(index=index, max_depth=max_depth)
 
     def retrieve_for_case(
         self,
         case: DeletionRequest,
         diagnostic_mode: bool = False,
+        precomputed_intent: Optional[Any] = None,
     ) -> CaseEvidencePacket:
         """Retrieve evidence packet for a single deletion audit case at its audit_at cutoff."""
         start_time = time.perf_counter()
@@ -42,13 +49,95 @@ class EvidenceRetrievalService:
         intent_decision: Optional[str] = None
         if diagnostic_mode:
             intent_decision = "BYPASS_DIAGNOSTIC"
+        elif precomputed_intent is not None:
+            if hasattr(precomputed_intent, "intent"):
+                dec = precomputed_intent.intent.decision
+                reason = getattr(precomputed_intent.intent.reason_code, "value", str(precomputed_intent.intent.reason_code))
+            else:
+                dec = getattr(precomputed_intent, "decision", None)
+                reason = getattr(precomputed_intent, "reason_code", getattr(precomputed_intent, "reason", "UNKNOWN"))
+
+            intent_decision = dec.value if hasattr(dec, "value") else str(dec)
+            if dec == IntentDecision.NON_DELETION:
+                diag = RetrievalDiagnostics(
+                    case_id=case.case_id,
+                    audit_at=case.audit_at,
+                    coverage_warnings=["Request does not authorize deletion."],
+                    execution_time_ms=(time.perf_counter() - start_time) * 1000,
+                )
+                return CaseEvidencePacket(
+                    case_id=case.case_id,
+                    email=case.email,
+                    requested_at=case.requested_at,
+                    reported_status=case.reported_status.value if hasattr(case.reported_status, "value") else str(case.reported_status),
+                    reported_at=case.reported_at,
+                    audit_at=case.audit_at,
+                    intent_decision=intent_decision,
+                    identity_status=IdentityResolutionStatus.UNRESOLVED,
+                    diagnostics=diag,
+                    is_blocked=True,
+                    blocking_reason=f"NON_DELETION: Intent classification determined non-deletion ({reason}). Investigation skipped.",
+                )
+            elif dec == IntentDecision.AMBIGUOUS:
+                diag = RetrievalDiagnostics(
+                    case_id=case.case_id,
+                    audit_at=case.audit_at,
+                    coverage_warnings=["Request intent is ambiguous."],
+                    execution_time_ms=(time.perf_counter() - start_time) * 1000,
+                )
+                return CaseEvidencePacket(
+                    case_id=case.case_id,
+                    email=case.email,
+                    requested_at=case.requested_at,
+                    reported_status=case.reported_status.value if hasattr(case.reported_status, "value") else str(case.reported_status),
+                    reported_at=case.reported_at,
+                    audit_at=case.audit_at,
+                    intent_decision=intent_decision,
+                    identity_status=IdentityResolutionStatus.UNRESOLVED,
+                    diagnostics=diag,
+                    is_blocked=True,
+                    blocking_reason=f"AMBIGUOUS: Request intent is ambiguous ({reason}). Investigation blocked.",
+                )
+            elif dec != IntentDecision.DELETION_REQUEST:
+                diag = RetrievalDiagnostics(
+                    case_id=case.case_id,
+                    audit_at=case.audit_at,
+                    coverage_warnings=[f"Unrecognized intent decision: {dec}"],
+                    execution_time_ms=(time.perf_counter() - start_time) * 1000,
+                )
+                return CaseEvidencePacket(
+                    case_id=case.case_id,
+                    email=case.email,
+                    requested_at=case.requested_at,
+                    reported_status=case.reported_status.value if hasattr(case.reported_status, "value") else str(case.reported_status),
+                    reported_at=case.reported_at,
+                    audit_at=case.audit_at,
+                    intent_decision=intent_decision,
+                    identity_status=IdentityResolutionStatus.UNRESOLVED,
+                    diagnostics=diag,
+                    is_blocked=True,
+                    blocking_reason=f"INTENT_UNRESOLVED: Invalid intent decision {dec}. Investigation blocked.",
+                )
         else:
             if self.intent_service:
                 try:
-                    intent_res = self.intent_service.classify(case.request_text)
-                    intent_decision = intent_res.decision.value
+                    if hasattr(self.intent_service, "classify_request"):
+                        intent_res = self.intent_service.classify_request(case)
+                    elif hasattr(self.intent_service, "classify_text"):
+                        intent_res = self.intent_service.classify_text(case.request_text, case_id=case.case_id)
+                    else:
+                        intent_res = self.intent_service.classify(case.request_text)
 
-                    if intent_res.decision == IntentDecision.NON_DELETION:
+                    if hasattr(intent_res, "intent"):
+                        dec = intent_res.intent.decision
+                        reason = getattr(intent_res.intent.reason_code, "value", str(intent_res.intent.reason_code))
+                    else:
+                        dec = getattr(intent_res, "decision", None)
+                        reason = getattr(intent_res, "reason_code", getattr(intent_res, "reason", "UNKNOWN"))
+
+                    intent_decision = dec.value if hasattr(dec, "value") else str(dec)
+
+                    if dec == IntentDecision.NON_DELETION:
                         diag = RetrievalDiagnostics(
                             case_id=case.case_id,
                             audit_at=case.audit_at,
@@ -66,9 +155,9 @@ class EvidenceRetrievalService:
                             identity_status=IdentityResolutionStatus.UNRESOLVED,
                             diagnostics=diag,
                             is_blocked=True,
-                            blocking_reason=f"NON_DELETION: Intent classification determined non-deletion ({intent_res.reason.value}). Investigation skipped.",
+                            blocking_reason=f"NON_DELETION: Intent classification determined non-deletion ({reason}). Investigation skipped.",
                         )
-                    elif intent_res.decision == IntentDecision.AMBIGUOUS:
+                    elif dec == IntentDecision.AMBIGUOUS:
                         diag = RetrievalDiagnostics(
                             case_id=case.case_id,
                             audit_at=case.audit_at,
@@ -86,13 +175,70 @@ class EvidenceRetrievalService:
                             identity_status=IdentityResolutionStatus.UNRESOLVED,
                             diagnostics=diag,
                             is_blocked=True,
-                            blocking_reason="AMBIGUOUS: Request intent is ambiguous and cannot be verified as an authorized deletion request.",
+                            blocking_reason=f"AMBIGUOUS: Request intent is ambiguous ({reason}). Investigation blocked.",
+                        )
+                    elif dec != IntentDecision.DELETION_REQUEST:
+                        diag = RetrievalDiagnostics(
+                            case_id=case.case_id,
+                            audit_at=case.audit_at,
+                            coverage_warnings=[f"Unrecognized intent decision: {dec}"],
+                            execution_time_ms=(time.perf_counter() - start_time) * 1000,
+                        )
+                        return CaseEvidencePacket(
+                            case_id=case.case_id,
+                            email=case.email,
+                            requested_at=case.requested_at,
+                            reported_status=case.reported_status.value if hasattr(case.reported_status, "value") else str(case.reported_status),
+                            reported_at=case.reported_at,
+                            audit_at=case.audit_at,
+                            intent_decision=intent_decision,
+                            identity_status=IdentityResolutionStatus.UNRESOLVED,
+                            diagnostics=diag,
+                            is_blocked=True,
+                            blocking_reason=f"INTENT_UNRESOLVED: Invalid intent decision {dec}. Investigation blocked.",
                         )
                 except Exception as ex:
-                    # When offline without model configured, fall back to explicit diagnostic bypass note
-                    intent_decision = f"ERROR_FALLBACK:{type(ex).__name__}"
+                    # Missing classification, configuration failure, or provider failure must NOT authorize investigation!
+                    diag = RetrievalDiagnostics(
+                        case_id=case.case_id,
+                        audit_at=case.audit_at,
+                        coverage_warnings=[f"Intent classification failed: {type(ex).__name__}: {str(ex)}"],
+                        execution_time_ms=(time.perf_counter() - start_time) * 1000,
+                    )
+                    return CaseEvidencePacket(
+                        case_id=case.case_id,
+                        email=case.email,
+                        requested_at=case.requested_at,
+                        reported_status=case.reported_status.value if hasattr(case.reported_status, "value") else str(case.reported_status),
+                        reported_at=case.reported_at,
+                        audit_at=case.audit_at,
+                        intent_decision=f"ERROR:{type(ex).__name__}",
+                        identity_status=IdentityResolutionStatus.UNRESOLVED,
+                        diagnostics=diag,
+                        is_blocked=True,
+                        blocking_reason=f"INTENT_UNRESOLVED: Intent classification failed ({type(ex).__name__}). Investigation not authorized without explicit diagnostic mode.",
+                    )
             else:
-                intent_decision = "DELETION_REQUEST"
+                # Missing intent service must NOT authorize investigation!
+                diag = RetrievalDiagnostics(
+                    case_id=case.case_id,
+                    audit_at=case.audit_at,
+                    coverage_warnings=["No intent classification service provided."],
+                    execution_time_ms=(time.perf_counter() - start_time) * 1000,
+                )
+                return CaseEvidencePacket(
+                    case_id=case.case_id,
+                    email=case.email,
+                    requested_at=case.requested_at,
+                    reported_status=case.reported_status.value if hasattr(case.reported_status, "value") else str(case.reported_status),
+                    reported_at=case.reported_at,
+                    audit_at=case.audit_at,
+                    intent_decision=None,
+                    identity_status=IdentityResolutionStatus.UNRESOLVED,
+                    diagnostics=diag,
+                    is_blocked=True,
+                    blocking_reason="INTENT_UNRESOLVED: No intent classification provided and diagnostic mode not enabled. Investigation blocked.",
+                )
 
         # 2. Identity Resolution
         id_result = self.identity_service.resolve_request(case)
@@ -131,6 +277,9 @@ class EvidenceRetrievalService:
             case_id=case.case_id,
             audit_at=case.audit_at,
             identity_result=id_result,
+            failed_files=self.failed_files,
+            deferred_files=self.deferred_files,
+            manifest_errors=self.manifest_errors,
         )
 
         # Extract subject identifiers for packet

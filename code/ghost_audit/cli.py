@@ -288,7 +288,59 @@ def main(argv: Optional[list[str]] = None) -> int:
     retrieve_parser.add_argument(
         "--report",
         action="store_true",
-        help="Print detailed diagnostic reporting.",
+        help="Generate detailed diagnostic evaluation report.",
+    )
+    # Subcommand: reconstruct-state
+    reconstruct_parser = subparsers.add_parser(
+        "reconstruct-state",
+        help="Reconstruct grounded resource states, visible PII, and process configurations at audit cutoff.",
+    )
+    reconstruct_parser.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        type=str,
+        default=None,
+        help="Specific case_id to reconstruct (e.g. case_01).",
+    )
+    reconstruct_parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Target sample deletion requests instead of evaluation set.",
+    )
+    reconstruct_parser.add_argument(
+        "--batch",
+        action="store_true",
+        default=False,
+        help="Batch process all requests in target dataset.",
+    )
+    reconstruct_parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="Diagnostic mode: bypass intent classification for debugging.",
+    )
+    reconstruct_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Path to dataset directory override.",
+    )
+    reconstruct_parser.add_argument(
+        "--mode",
+        choices=["all", "structured", "multimodal"],
+        default="structured",
+        help="Ingestion mode (default: 'structured').",
+    )
+    reconstruct_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON format.",
+    )
+    reconstruct_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for ignored artifacts.",
     )
 
     args = parser.parse_args(argv)
@@ -353,7 +405,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             mode=args.mode,
             json_output=args.json,
             artifacts_dir=args.artifacts_dir,
-            write_report=args.report,
+            write_report=getattr(args, "report", False),
+        )
+
+    if args.command == "reconstruct-state":
+        from ghost_audit.state.cli import run_reconstruct_state
+
+        return run_reconstruct_state(
+            case_id=args.case_id,
+            sample=args.sample,
+            batch=args.batch,
+            diagnostic=args.diagnostic,
+            dataset_dir=args.dataset,
+            mode=args.mode,
+            json_output=args.json,
+            artifacts_dir=args.artifacts_dir,
         )
 
     return 0

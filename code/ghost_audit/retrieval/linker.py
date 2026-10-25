@@ -39,6 +39,9 @@ class EvidenceLinker:
         case_id: str,
         audit_at: datetime,
         identity_result: IdentityResolutionResult,
+        failed_files: Sequence[str] = (),
+        deferred_files: Sequence[str] = (),
+        manifest_errors: Sequence[str] = (),
     ) -> tuple[
         list[SelectedObservation],
         list[SelectedActivity],
@@ -73,11 +76,25 @@ class EvidenceLinker:
         # -------------------------------------------------------------
         # Phase 1: Authoritative Catalog Links (LINK_RESOURCE_IDENTITY)
         # -------------------------------------------------------------
-        catalog_entries = self.index.get_catalog_links_for_subject(
+        all_catalog_entries = self.index.get_catalog_links_for_subject(
             user_id=user_id,
             emails=subject_identifiers["emails"],
-            cutoff=audit_at,
+            cutoff=None,
         )
+        catalog_entries = []
+        for cat in all_catalog_entries:
+            if cat.event_time > audit_at:
+                rejected_links.append(
+                    AmbiguousOrRejectedLink(
+                        candidate_endpoint=f"resource:{cat.canonical_resource_id}",
+                        source_id=cat.activity_id,
+                        reason=f"FUTURE_TIMESTAMP_EXCLUDED: Catalog event time {cat.event_time.isoformat()} exceeds audit cutoff {audit_at.isoformat()}.",
+                        details={"canonical_resource_id": cat.canonical_resource_id, "event_time": cat.event_time.isoformat()},
+                    )
+                )
+            else:
+                catalog_entries.append(cat)
+
         for cat in catalog_entries:
             res_key = ResourceKey(system_id=cat.target_system, resource_id=cat.canonical_resource_id)
             res_key_str = str(res_key)
@@ -119,7 +136,21 @@ class EvidenceLinker:
         # Phase 2: Direct Identifier Matching in Eligible Observations
         # -------------------------------------------------------------
         for ident in subject_identifiers["all"]:
-            raw_obs_list = self.index.get_observations_for_identifier(ident, cutoff=audit_at)
+            all_raw_obs = self.index.get_observations_for_identifier(ident, cutoff=None)
+            raw_obs_list = []
+            for obs in all_raw_obs:
+                if obs.capture_time > audit_at or (obs.observation_time and obs.observation_time > audit_at):
+                    rejected_links.append(
+                        AmbiguousOrRejectedLink(
+                            candidate_endpoint=f"observation:{obs.evidence_id}:{obs.source_locator or ''}",
+                            source_id=obs.evidence_id,
+                            reason=f"FUTURE_TIMESTAMP_EXCLUDED: Observation time exceeds audit cutoff {audit_at.isoformat()}.",
+                            details={"matched_identifier": ident, "capture_time": obs.capture_time.isoformat()},
+                        )
+                    )
+                else:
+                    raw_obs_list.append(obs)
+
             for obs in raw_obs_list:
                 # Check for cross-user collision / leakage
                 obs_user_id = obs.extracted_facts.get("user_id") or (
@@ -262,17 +293,24 @@ class EvidenceLinker:
                     )
                     links.append(link)
 
+                    obs_res_str = r_str
+                    if obs.system_id and obs.resource_id:
+                        actual_key = ResourceKey(system_id=obs.system_id, resource_id=obs.resource_id, source_locator=obs.source_locator)
+                        actual_key_str = str(actual_key)
+                        grounded_resources[actual_key_str] = actual_key
+                        obs_res_str = actual_key_str
+
                     if obs_key not in selected_obs_map:
                         selected_obs_map[obs_key] = SelectedObservation(
                             observation=obs,
                             matched_identifiers=[],
-                            grounded_resources=[r_str],
+                            grounded_resources=[obs_res_str],
                             primary_relationship=LinkRelationship.OBSERVATION_RESOURCE_CHAIN,
                             supporting_links=[link],
                         )
                     else:
-                        if r_str not in selected_obs_map[obs_key].grounded_resources:
-                            selected_obs_map[obs_key].grounded_resources.append(r_str)
+                        if obs_res_str not in selected_obs_map[obs_key].grounded_resources:
+                            selected_obs_map[obs_key].grounded_resources.append(obs_res_str)
                         selected_obs_map[obs_key].supporting_links.append(link)
 
                     # Extract chained resources
@@ -282,7 +320,9 @@ class EvidenceLinker:
                         for chained_r in linked_res:
                             chained_str = str(chained_r).strip()
                             if chained_str:
-                                chained_key = ResourceKey(system_id=obs.system_id or "unknown", resource_id=chained_str)
+                                # When system is not specified in the reference, leave system as unknown
+                                # to be grounded by the actual store observation
+                                chained_key = ResourceKey(system_id="unknown", resource_id=chained_str)
                                 chained_key_str = str(chained_key)
                                 if (
                                     chained_key_str in grounded_resources
@@ -300,11 +340,24 @@ class EvidenceLinker:
         # Phase 4: Relevant Pre-Cutoff System Activity Matching
         # -------------------------------------------------------------
         for r_str, r_key in grounded_resources.items():
-            activities = self.index.get_activities_for_resource(
+            all_activities = self.index.get_activities_for_resource(
                 system_id=r_key.system_id if r_key.system_id != "unknown" else None,
                 resource_id=r_key.resource_id,
-                cutoff=audit_at,
+                cutoff=None,
             )
+            activities = []
+            for act in all_activities:
+                if act.event_time > audit_at:
+                    rejected_links.append(
+                        AmbiguousOrRejectedLink(
+                            candidate_endpoint=f"activity:{act.activity_id}",
+                            source_id=act.activity_id,
+                            reason=f"FUTURE_TIMESTAMP_EXCLUDED: Activity event time {act.event_time.isoformat()} exceeds audit cutoff {audit_at.isoformat()}.",
+                            details={"activity_id": act.activity_id, "event_time": act.event_time.isoformat(), "resource_id": act.resource_id},
+                        )
+                    )
+                else:
+                    activities.append(act)
             for act in activities:
                 link = EvidenceLink(
                     link_id=next_link_id(),
@@ -370,6 +423,12 @@ class EvidenceLinker:
         total_eligible_acts = sum(1 for a in self.index.activity_events if a.event_time <= audit_at)
         total_future_acts = len(self.index.activity_events) - total_eligible_acts
 
+        scope = "KNOWN_COMPLETE"
+        if failed_files or manifest_errors or depth >= self.max_depth:
+            scope = "KNOWN_INCOMPLETE"
+        elif deferred_files:
+            scope = "KNOWN_INCOMPLETE"
+
         diagnostics = RetrievalDiagnostics(
             case_id=case_id,
             audit_at=audit_at,
@@ -380,6 +439,10 @@ class EvidenceLinker:
             max_expansion_depth_reached=depth,
             cycles_detected=sorted(list(set(cycles_detected))),
             coverage_warnings=coverage_warnings,
+            coverage_scope=scope,
+            failed_files=list(failed_files),
+            deferred_files=list(deferred_files),
+            manifest_errors=list(manifest_errors),
             execution_time_ms=elapsed_ms,
         )
 

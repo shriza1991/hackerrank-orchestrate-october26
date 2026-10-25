@@ -64,8 +64,10 @@ def evaluate_sample_retrieval(
             steps_raw = row.get("steps_json", "[]")
             try:
                 steps = json.loads(steps_raw)
-            except Exception:
-                steps = []
+            except Exception as ex:
+                raise ValueError(
+                    f"Malformed reference data in {sample_output_path} for case {cid}: {ex}"
+                ) from ex
 
             exp_res: set[str] = set()
             exp_ev: set[str] = set()
@@ -75,9 +77,7 @@ def evaluate_sample_retrieval(
                 ev_id = s.get("evidence_id")
 
                 if sys_id and r_id:
-                    exp_res.add(f"{sys_id}:{r_id}")
-                elif r_id:
-                    exp_res.add(r_id)
+                    exp_res.add(f"{sys_id.strip()}:{r_id.strip()}")
 
                 if ev_id and ev_id.strip():
                     exp_ev.add(ev_id.strip())
@@ -121,35 +121,39 @@ def evaluate_sample_retrieval(
             tot_exp_ev += len(exp_ev_list)
             continue
 
-        # Grounded resources in packet
-        packet_grounded = set(pkt.grounded_resources)
-        # Also include resource_id from selected observations and activities
+        # System-qualified grounded resources in packet
+        packet_grounded: set[str] = set()
+        for gr in pkt.grounded_resources:
+            # gr is string representation e.g. "account_service:account_001@..." or "account_service:account_001"
+            parts = gr.split("@")[0].split("[")[0].strip()
+            if ":" in parts:
+                s_id, r_id = parts.split(":", 1)
+                packet_grounded.add(f"{s_id.strip()}:{r_id.strip()}")
+
         for so in pkt.selected_observations:
             if so.observation.system_id and so.observation.resource_id:
-                packet_grounded.add(f"{so.observation.system_id}:{so.observation.resource_id}")
-            if so.observation.resource_id:
-                packet_grounded.add(so.observation.resource_id)
+                packet_grounded.add(f"{so.observation.system_id.strip()}:{so.observation.resource_id.strip()}")
+
         for sa in pkt.selected_activities:
-            packet_grounded.add(f"{sa.target_system}:{sa.resource_id}")
-            packet_grounded.add(sa.resource_id)
+            if sa.target_system and sa.resource_id:
+                packet_grounded.add(f"{sa.target_system.strip()}:{sa.resource_id.strip()}")
 
         found_res: list[str] = []
         missing_res: list[str] = []
         for r in exp_res_list:
-            # Check full match or resource_id match
-            r_id_only = r.split(":")[-1] if ":" in r else r
-            if r in packet_grounded or r_id_only in packet_grounded or any(g.endswith(f":{r_id_only}") for g in packet_grounded):
+            # Require exact system-qualified match
+            if r in packet_grounded:
                 found_res.append(r)
             else:
                 missing_res.append(r)
 
         res_pct = (len(found_res) / len(exp_res_list) * 100.0) if exp_res_list else 100.0
 
-        # Found evidence IDs
+        # Found evidence IDs from selected observations and activities directly linking to the subject
         packet_evidence_ids = {so.observation.evidence_id for so in pkt.selected_observations}
-        # Also check scoped inventories
-        for si in pkt.scoped_inventories:
-            packet_evidence_ids.add(si.source_id)
+        for sa in pkt.selected_activities:
+            if sa.activity_id:
+                packet_evidence_ids.add(sa.activity_id)
 
         found_ev: list[str] = []
         missing_ev: list[str] = []

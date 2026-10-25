@@ -172,6 +172,10 @@ class RetrievalDiagnostics(BaseModel):
     max_expansion_depth_reached: int = 0
     cycles_detected: list[str] = Field(default_factory=list)
     coverage_warnings: list[str] = Field(default_factory=list)
+    coverage_scope: str = "KNOWN_COMPLETE"  # KNOWN_COMPLETE, KNOWN_INCOMPLETE, UNKNOWN
+    failed_files: list[str] = Field(default_factory=list)
+    deferred_files: list[str] = Field(default_factory=list)
+    manifest_errors: list[str] = Field(default_factory=list)
     execution_time_ms: float = 0.0
 
     @field_validator("audit_at", mode="before")
