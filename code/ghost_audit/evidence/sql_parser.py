@@ -241,6 +241,10 @@ class SqlEvidenceParser:
                 if table_region:
                     table_scope_ctx["region"] = table_region
 
+                cursor.execute(f'SELECT * FROM "{table_name}"')
+                rows = cursor.fetchall()
+                all_table_rows = [dict(zip(col_names, r)) for r in rows]
+
                 # 1. Emit INVENTORY_SCOPE observation for the table
                 obs_idx += 1
                 observations.append(
@@ -256,6 +260,7 @@ class SqlEvidenceParser:
                             "row_count": row_count,
                             "columns": col_names,
                             "schema_sql": schema_sql,
+                            "table_rows": all_table_rows,
                         },
                         extraction_method=self.parser_name,
                         uncertainty_or_warnings=[],
@@ -270,8 +275,6 @@ class SqlEvidenceParser:
 
                 # 2. Emit row observations if any exist
                 if row_count > 0:
-                    cursor.execute(f'SELECT * FROM "{table_name}"')
-                    rows = cursor.fetchall()
                     for r_idx, row in enumerate(rows, start=1):
                         obs_idx += 1
                         row_dict = dict(zip(col_names, row))

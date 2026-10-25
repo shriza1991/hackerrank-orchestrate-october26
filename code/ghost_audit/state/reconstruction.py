@@ -18,8 +18,10 @@ from ghost_audit.state.models import (
     ExistenceState,
     FieldObservation,
     FieldStatus,
+    ProcessObservation,
     ProcessState,
     ResourceStateAggregate,
+    RestoreObservation,
     RestoreState,
     ScopedAbsenceCheck,
     StateDiagnostics,
@@ -381,6 +383,8 @@ class ResourceStateEngine:
         recreations_detected: list[str] = []
         active_processes: list[str] = []
         restore_risks: list[str] = []
+        process_observations: list[ProcessObservation] = []
+        restore_observations: list[RestoreObservation] = []
 
         # Process selected observations
         for so in packet.selected_observations:
@@ -481,7 +485,40 @@ class ResourceStateEngine:
                 elif ts_info.state_observation_time == curr.last_observation_time:
                     if observed_exist != curr.existence:
                         curr.existence = ExistenceState.CONFLICTED
-                        curr.conflicts.append(f"Equal-time contradictory observations at {ts_info.state_observation_time.isoformat()}: {curr.existence} vs {observed_exist}")
+            if proc_st in {ProcessState.ENABLED, ProcessState.DISABLED}:
+                p_id = facts.get("process_id") or facts.get("connector_id") or r_id
+                target_r = facts.get("target_resource_id") or facts.get("target_resource") or r_id
+                process_observations.append(
+                    ProcessObservation(
+                        process_id=p_id,
+                        system_id=sys_id,
+                        target_resource=target_r,
+                        target_copy=copy_str,
+                        process_type=facts.get("process_type") or "DATA_FLOW",
+                        state=proc_st,
+                        is_claim=False,
+                        evidence_id=obs.evidence_id,
+                        timestamp=ts_info.state_observation_time,
+                        details=str(facts.get("details") or facts.get("message") or ""),
+                    )
+                )
+
+            if rest_st in {RestoreState.ALLOWED, RestoreState.BLOCKED}:
+                b_id = facts.get("backup_id") or r_id
+                target_r = facts.get("target_resource_id") or facts.get("target_resource") or r_id
+                restore_observations.append(
+                    RestoreObservation(
+                        backup_id=b_id,
+                        system_id=sys_id,
+                        target_resource=target_r,
+                        target_copy=copy_str,
+                        restore_state=rest_st,
+                        is_claim=False,
+                        evidence_id=obs.evidence_id,
+                        timestamp=ts_info.state_observation_time,
+                        details=str(facts.get("details") or facts.get("message") or ""),
+                    )
+                )
 
         # Process system activity claims
         for sa in packet.selected_activities:
@@ -511,12 +548,39 @@ class ResourceStateEngine:
             if act_event.event_type == "DISABLE_DATA_FLOW":
                 if act_event.reported_result == "SUCCESS":
                     active_processes.append(f"{act_event.activity_id}:CLAIMED_DISABLED")
+                process_observations.append(
+                    ProcessObservation(
+                        process_id=act_event.resource_id,
+                        system_id=sys_id,
+                        target_resource=act_event.resource_id,
+                        process_type="DATA_FLOW",
+                        state=ProcessState.DISABLED if act_event.reported_result == "SUCCESS" else ProcessState.UNKNOWN,
+                        is_claim=True,
+                        claim_result=act_event.reported_result,
+                        evidence_id=act_event.activity_id,
+                        timestamp=act_event.event_time,
+                        details=act_event.details,
+                    )
+                )
             elif act_event.event_type in {"RESTORE", "SYNC", "STREAM_SYNC"}:
                 active_processes.append(f"{act_event.activity_id}:{act_event.event_type}")
 
             if act_event.event_type == "BLOCK_RESTORE":
                 if act_event.reported_result == "SUCCESS":
                     restore_risks.append(f"{act_event.activity_id}:CLAIMED_BLOCKED")
+                restore_observations.append(
+                    RestoreObservation(
+                        backup_id=act_event.resource_id,
+                        system_id=sys_id,
+                        target_resource=act_event.resource_id,
+                        restore_state=RestoreState.BLOCKED if act_event.reported_result == "SUCCESS" else RestoreState.UNKNOWN,
+                        is_claim=True,
+                        claim_result=act_event.reported_result,
+                        evidence_id=act_event.activity_id,
+                        timestamp=act_event.event_time,
+                        details=act_event.details,
+                    )
+                )
 
             # Attach claim to copy assessments
             relevant_copies = resource_copies_map.get(canon_key, [])
@@ -790,6 +854,8 @@ class ResourceStateEngine:
             resources=resources,
             active_processes=sorted(list(set(active_processes))),
             restore_risks=sorted(list(set(restore_risks))),
+            process_observations=process_observations,
+            restore_observations=restore_observations,
             scoped_absence_checks=all_absence_checks,
             diagnostics=diagnostics,
         )

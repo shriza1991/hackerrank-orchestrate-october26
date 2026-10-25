@@ -18,7 +18,7 @@ from ghost_audit.policy.models import (
 )
 from ghost_audit.policy.rules import PolicyRuleCatalog
 from ghost_audit.retrieval.models import CaseEvidencePacket
-from ghost_audit.state.models import CaseStateReconstruction, ExistenceState
+from ghost_audit.state.models import CaseStateReconstruction, ExistenceState, ProcessState, RestoreState
 
 
 class PolicyDecisionEngine:
@@ -50,11 +50,14 @@ class PolicyDecisionEngine:
 
         if not is_authorized and not is_diagnostic:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
+            is_non_deletion = (recon.blocking_reason and "NON_DELETION" in recon.blocking_reason) or (
+                packet and packet.intent_decision == "NON_DELETION"
+            )
             return CasePolicyAssessment(
                 case_id=recon.case_id,
                 audit_at=recon.audit_at,
                 is_authorized_deletion=False,
-                intent_status="BLOCKED",
+                intent_status="NON_DELETION" if is_non_deletion else "BLOCKED",
                 diagnostic_bypass=False,
                 is_blocked=True,
                 blocking_reason=recon.blocking_reason or "Intent authorization not established; blocked without diagnostic bypass.",
@@ -103,65 +106,133 @@ class PolicyDecisionEngine:
 
         # 2. Assess process risks
         process_risks: list[ProcessRiskAssessment] = []
-        for proc_str in recon.active_processes:
-            # format: f"{activity_id}:{event_type}" or f"{act_id}:CLAIMED_DISABLED"
-            proc_parts = proc_str.split(":", 1)
-            proc_id = proc_parts[0]
-            proc_type = proc_parts[1] if len(proc_parts) > 1 else "UNKNOWN"
-
-            if proc_type == "CLAIMED_DISABLED":
-                process_risks.append(
-                    ProcessRiskAssessment(
-                        process_id=proc_id,
-                        system_id="integration_service",
-                        risk_type="UNVERIFIED_DISABLE",
-                        is_active=True,
-                        details="Disable claimed in activity log but unverified in active process state.",
-                        supporting_evidence=[proc_id],
+        if recon.process_observations:
+            for pobs in recon.process_observations:
+                if pobs.is_claim:
+                    if pobs.state == ProcessState.DISABLED:
+                        is_observed_disabled = any(
+                            o.process_id == pobs.process_id and o.state == ProcessState.DISABLED and not o.is_claim
+                            for o in recon.process_observations
+                        )
+                        if not is_observed_disabled:
+                            process_risks.append(
+                                ProcessRiskAssessment(
+                                    process_id=pobs.process_id,
+                                    system_id=pobs.system_id,
+                                    target_resource=pobs.target_resource,
+                                    target_copy=pobs.target_copy,
+                                    risk_type="UNVERIFIED_DISABLE",
+                                    is_active=True,
+                                    details=f"Disable claimed for {pobs.process_id} in {pobs.system_id} but unverified in active process state.",
+                                    supporting_evidence=[pobs.evidence_id] if pobs.evidence_id else [],
+                                )
+                            )
+                else:
+                    if pobs.state == ProcessState.ENABLED:
+                        process_risks.append(
+                            ProcessRiskAssessment(
+                                process_id=pobs.process_id,
+                                system_id=pobs.system_id,
+                                target_resource=pobs.target_resource,
+                                target_copy=pobs.target_copy,
+                                risk_type="ACTIVE_DATA_FLOW",
+                                is_active=True,
+                                details=f"Active data flow {pobs.process_id} observed enabled in {pobs.system_id}.",
+                                supporting_evidence=[pobs.evidence_id] if pobs.evidence_id else [],
+                            )
+                        )
+        else:
+            for proc_str in recon.active_processes:
+                proc_parts = proc_str.split(":", 1)
+                proc_id = proc_parts[0]
+                proc_type = proc_parts[1] if len(proc_parts) > 1 else "UNKNOWN"
+                if proc_type == "CLAIMED_DISABLED":
+                    process_risks.append(
+                        ProcessRiskAssessment(
+                            process_id=proc_id,
+                            system_id="integration_service",
+                            risk_type="UNVERIFIED_DISABLE",
+                            is_active=True,
+                            details="Disable claimed in activity log but unverified in active process state.",
+                            supporting_evidence=[proc_id],
+                        )
                     )
-                )
-            elif proc_type in {"SYNC", "STREAM_SYNC", "RESTORE"}:
-                process_risks.append(
-                    ProcessRiskAssessment(
-                        process_id=proc_id,
-                        system_id="integration_service",
-                        risk_type=f"ACTIVE_{proc_type}",
-                        is_active=True,
-                        details=f"Active data flow or sync process '{proc_type}' observed or running.",
-                        supporting_evidence=[proc_id],
+                elif proc_type == "STREAM_SYNC":
+                    process_risks.append(
+                        ProcessRiskAssessment(
+                            process_id=proc_id,
+                            system_id="integration_service",
+                            risk_type="ACTIVE_STREAM_SYNC",
+                            is_active=True,
+                            details="Active stream sync observed or running.",
+                            supporting_evidence=[proc_id],
+                        )
                     )
-                )
 
         # 3. Assess restore risks
         restore_risks: list[RestoreRiskAssessment] = []
-        for rest_str in recon.restore_risks:
-            # format: f"{act_id}:CLAIMED_BLOCKED" or f"{canon_key}:RESTORE_ALLOWED"
-            rest_parts = rest_str.split(":", 1)
-            b_id = rest_parts[0]
-            rest_type = rest_parts[1] if len(rest_parts) > 1 else "RESTORE_RISK"
-
-            if rest_type == "CLAIMED_BLOCKED":
-                restore_risks.append(
-                    RestoreRiskAssessment(
-                        backup_id=b_id,
-                        system_id="backup_service",
-                        risk_type="UNVERIFIED_BLOCK",
-                        is_blocked=False,
-                        details="Restore block was claimed in activity log but unverified in storage permissions.",
-                        supporting_evidence=[b_id],
+        if recon.restore_observations:
+            for robs in recon.restore_observations:
+                if robs.is_claim:
+                    if robs.restore_state == RestoreState.BLOCKED:
+                        is_observed_blocked = any(
+                            o.backup_id == robs.backup_id and o.restore_state == RestoreState.BLOCKED and not o.is_claim
+                            for o in recon.restore_observations
+                        )
+                        if not is_observed_blocked:
+                            restore_risks.append(
+                                RestoreRiskAssessment(
+                                    backup_id=robs.backup_id,
+                                    system_id=robs.system_id,
+                                    target_resource=robs.target_resource,
+                                    target_copy=robs.target_copy,
+                                    risk_type="UNVERIFIED_BLOCK",
+                                    is_blocked=False,
+                                    details=f"Restore block claimed for {robs.backup_id} in {robs.system_id} but unverified in storage permissions.",
+                                    supporting_evidence=[robs.evidence_id] if robs.evidence_id else [],
+                                )
+                            )
+                else:
+                    if robs.restore_state == RestoreState.ALLOWED:
+                        restore_risks.append(
+                            RestoreRiskAssessment(
+                                backup_id=robs.backup_id,
+                                system_id=robs.system_id,
+                                target_resource=robs.target_resource,
+                                target_copy=robs.target_copy,
+                                risk_type="RESTORE_PERMITTED",
+                                is_blocked=False,
+                                details=f"Backup archive {robs.backup_id} in {robs.system_id} has restore access allowed.",
+                                supporting_evidence=[robs.evidence_id] if robs.evidence_id else [],
+                            )
+                        )
+        else:
+            for rest_str in recon.restore_risks:
+                if ":RESTORE_ALLOWED" in rest_str:
+                    key = rest_str.replace(":RESTORE_ALLOWED", "")
+                    sys_name, b_id = key.split(":", 1) if ":" in key else ("backup_service", key)
+                    restore_risks.append(
+                        RestoreRiskAssessment(
+                            backup_id=b_id,
+                            system_id=sys_name,
+                            risk_type="RESTORE_PERMITTED",
+                            is_blocked=False,
+                            details=f"Backup archive {b_id} in {sys_name} has restore access allowed.",
+                            supporting_evidence=[],
+                        )
                     )
-                )
-            elif rest_type == "RESTORE_ALLOWED":
-                restore_risks.append(
-                    RestoreRiskAssessment(
-                        backup_id=b_id,
-                        system_id="backup_service",
-                        risk_type="RESTORE_PERMITTED",
-                        is_blocked=False,
-                        details="Backup archive restore access is currently permitted.",
-                        supporting_evidence=[b_id],
+                elif ":CLAIMED_BLOCKED" in rest_str:
+                    b_id = rest_str.split(":", 1)[0]
+                    restore_risks.append(
+                        RestoreRiskAssessment(
+                            backup_id=b_id,
+                            system_id="backup_service",
+                            risk_type="UNVERIFIED_BLOCK",
+                            is_blocked=False,
+                            details="Restore block was claimed in activity log but unverified in storage permissions.",
+                            supporting_evidence=[b_id],
+                        )
                     )
-                )
 
         # 4. Synthesize overall compliance
         violations: list[str] = []
@@ -181,13 +252,24 @@ class PolicyDecisionEngine:
             if not rr.is_blocked:
                 violations.append(f"Unblocked restore risk {rr.backup_id} ({rr.risk_type})")
 
-        coverage_limitations = list(recon.diagnostics.deferred_files) + list(
-            recon.diagnostics.unreadable_or_failed_files
+        coverage_limitations = (
+            list(recon.diagnostics.deferred_files) + list(recon.diagnostics.unreadable_or_failed_files)
+            if recon.diagnostics
+            else []
         )
+
+        # Distinguish demonstrated case-specific limitations from unknown corpus-level deferred files
+        case_specific_limitations = [
+            f"Resource {c_key} coverage limitation: {'; '.join(r.coverage_limitations)}"
+            for c_key, r in evaluated_resources.items()
+            if r.coverage_limitations
+        ]
+        if case_specific_limitations:
+            unresolved.extend(case_specific_limitations)
 
         if violations:
             overall_outcome = PolicyComplianceOutcome.VIOLATED
-        elif unresolved or coverage_limitations:
+        elif unresolved:
             overall_outcome = PolicyComplianceOutcome.UNDETERMINED
         elif evaluated_resources and all(r.outcome == PolicyComplianceOutcome.SATISFIED for r in evaluated_resources.values()):
             overall_outcome = PolicyComplianceOutcome.SATISFIED

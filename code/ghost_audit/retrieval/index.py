@@ -125,7 +125,7 @@ def _extract_identifiers_from_dict(
             elif k in {"resource_id", "target_resource"}:
                 sys_id = d.get("origin_system") or d.get("system_id") or d.get("service")
                 resources.add((sys_id, v_str))
-            elif k in {"file_name", "attachment_file", "export_job_id", "external_reference", "display_ref"}:
+            elif k in {"file_name", "attachment_file", "export_job_id", "external_reference", "display_ref", "trace_id", "correlation_key", "requestId", "archive_key"}:
                 aliases.add(v_str)
 
 

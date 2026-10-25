@@ -397,6 +397,74 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Optional directory for ignored artifacts.",
     )
 
+    # run-audit parser
+    audit_parser = subparsers.add_parser(
+        "run-audit",
+        help="Run end-to-end deletion-audit pipeline and generate validated prediction CSV.",
+    )
+    audit_parser.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        type=str,
+        default=None,
+        help="Target case ID to evaluate (e.g. case_01).",
+    )
+    audit_parser.add_argument(
+        "--sample",
+        action="store_true",
+        default=False,
+        help="Use sample dataset instead of full evaluation dataset.",
+    )
+    audit_parser.add_argument(
+        "--mode",
+        choices=["all", "structured", "multimodal"],
+        default="structured",
+        help="Evidence ingestion mode (default: 'structured').",
+    )
+    audit_parser.add_argument(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Explicitly authorize live model calls.",
+    )
+    audit_parser.add_argument(
+        "--intent-cache",
+        type=Path,
+        default=None,
+        help="Path to precomputed/cached intent classifications JSON.",
+    )
+    audit_parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Path to output CSV file.",
+    )
+    audit_parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        default=False,
+        help="Diagnostic mode: bypass intent requirement to inspect pipeline state.",
+    )
+    audit_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Path to dataset directory override.",
+    )
+    audit_parser.add_argument(
+        "--usage-report",
+        type=Path,
+        default=None,
+        help="Optional path to write LLM usage report JSON.",
+    )
+    audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output run summary as JSON.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -489,6 +557,75 @@ def main(argv: Optional[list[str]] = None) -> int:
             json_output=args.json,
             artifacts_dir=args.artifacts_dir,
         )
+
+    if args.command == "run-audit":
+        from ghost_audit.runner import AuditPipelineRunner
+
+        settings = get_settings(args.dataset)
+        runner = AuditPipelineRunner(
+            settings=settings,
+            mode=args.mode,
+            live=args.live,
+            intent_cache_path=args.intent_cache,
+            diagnostic=args.diagnostic,
+        )
+        try:
+            rows, summary = runner.run(
+                case_id=args.case_id,
+                sample=args.sample,
+                output_file=args.output,
+            )
+        except Exception as ex:
+            print(f"Error executing audit pipeline: {ex}", file=sys.stderr)
+            return 1
+
+        if args.usage_report and summary.usage_summary:
+            try:
+                with open(args.usage_report, "w", encoding="utf-8") as f:
+                    json.dump(summary.usage_summary, f, indent=2)
+            except Exception as ex:
+                print(f"Warning: Failed to write usage report to {args.usage_report}: {ex}", file=sys.stderr)
+
+        if args.json:
+            result = {
+                "total_cases": summary.total_cases,
+                "complete_cases": summary.complete_cases,
+                "incomplete_cases": summary.incomplete_cases,
+                "not_applicable_cases": summary.not_applicable_cases,
+                "unresolved_cases": summary.unresolved_cases,
+                "diagnostic_bypass_count": summary.diagnostic_bypass_count,
+                "is_valid_for_submission": summary.is_valid_for_submission,
+                "output_path": summary.output_path,
+                "execution_time_ms": summary.execution_time_ms,
+                "unresolved_details": summary.unresolved_details,
+            }
+            print(json.dumps(result, indent=2))
+        else:
+            print("=" * 68)
+            print("GHOST DATA STILL EXISTS: AUDIT PIPELINE RUN SUMMARY")
+            print("=" * 68)
+            print(f"Total Cases Evaluated   : {summary.total_cases}")
+            print(f"  - COMPLETE            : {summary.complete_cases}")
+            print(f"  - INCOMPLETE          : {summary.incomplete_cases}")
+            print(f"  - NOT_APPLICABLE      : {summary.not_applicable_cases}")
+            print(f"  - UNRESOLVED          : {summary.unresolved_cases}")
+            if summary.diagnostic_bypass_count > 0:
+                print(f"  - DIAGNOSTIC BYPASS   : {summary.diagnostic_bypass_count}")
+            print(f"Submittable Clean Run   : {'YES' if summary.is_valid_for_submission else 'NO'}")
+            if summary.output_path:
+                print(f"Output CSV Written      : {summary.output_path}")
+            print(f"Execution Time          : {summary.execution_time_ms:.1f} ms")
+            print("-" * 68)
+            if summary.unresolved_cases > 0:
+                print("UNRESOLVED CASES / BLOCKERS:")
+                for cid, reasons in list(summary.unresolved_details.items())[:10]:
+                    print(f"  [{cid}]: {'; '.join(reasons)}")
+                if len(summary.unresolved_details) > 10:
+                    print(f"  ... and {len(summary.unresolved_details) - 10} more unresolved cases.")
+
+        if summary.unresolved_cases > 0 and not args.diagnostic:
+            return 1
+        return 0
 
     return 0
 

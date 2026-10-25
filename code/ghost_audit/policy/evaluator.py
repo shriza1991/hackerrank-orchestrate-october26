@@ -205,18 +205,25 @@ class PolicyEvaluator:
         # -------------------------------------------------------------
         elif category == DataCategory.SUPPORT_MESSAGE:
             # Condition: Conversation contains shared customer, agent, or order context that must be retained
-            has_shared_context = (
-                combined_facts.get("has_shared_context") is True
-                or combined_facts.get("shared_context") is True
-                or "agent" in combined_facts
-                or "order_id" in combined_facts
-                or "ticket" in sys_id.lower() or "support" in sys_id.lower()
-            )
-            # Check explicit false if provided
-            if combined_facts.get("has_shared_context") is False:
-                has_shared_context = False
+            has_shared_explicit = combined_facts.get("has_shared_context")
+            if has_shared_explicit is None:
+                has_shared_explicit = combined_facts.get("shared_context")
 
-            if has_shared_context:
+            if has_shared_explicit is True or combined_facts.get("participants_count", 1) > 1:
+                has_shared_context = True
+            elif has_shared_explicit is False or combined_facts.get("participants_count") == 1:
+                has_shared_context = False
+            elif "agent" in combined_facts or "agent_id" in combined_facts or "order_id" in combined_facts:
+                has_shared_context = True
+            else:
+                has_shared_context = None
+
+            if has_shared_context is None:
+                condition_eval = ConditionEvaluation.UNKNOWN
+                condition_details = "Missing facts establishing whether support conversation contains shared context."
+                outcome = PolicyComplianceOutcome.UNDETERMINED
+                missing_facts.append("Shared context facts missing for support message.")
+            elif has_shared_context is True:
                 condition_eval = ConditionEvaluation.TRUE
                 condition_details = "Conversation contains shared agent, customer, or order context requiring retention."
                 retention_obligation = "Support message context must be retained with subject identifiers redacted."
@@ -228,24 +235,47 @@ class PolicyEvaluator:
                 elif copy_ast.existence == ExistenceState.PRESENT:
                     # Check subject identifiers only (not other participants)
                     # Check direct PII in copy fields or facts matching subject
-                    subject_pii_present = False
-                    for fname, fobs in copy_ast.fields.items():
-                        if fobs.status == FieldStatus.EXPOSED:
-                            val_str = str(fobs.raw_value or "").lower()
-                            if any(ident.lower() in val_str for ident in subject_identifiers):
-                                subject_pii_present = True
-                                break
-                    if not subject_pii_present and observed_pii_exposed:
-                        # Check whether exposed pii belongs to subject
-                        for pd in pii_details:
-                            if any(ident.lower() in pd.lower() for ident in subject_identifiers):
-                                subject_pii_present = True
-                                break
-
-                    if subject_pii_present:
-                        outcome = PolicyComplianceOutcome.VIOLATED
+                    has_content_evidence = bool(copy_ast.fields) or any(
+                        k in combined_facts for k in ["body", "message", "text", "content", "record_json"]
+                    )
+                    if not has_content_evidence:
+                        outcome = PolicyComplianceOutcome.UNDETERMINED
+                        missing_facts.append("Support message content/fields missing to prove redaction.")
                     else:
-                        outcome = PolicyComplianceOutcome.SATISFIED
+                        subject_pii_present = False
+                        for fname, fobs in copy_ast.fields.items():
+                            if fobs.status == FieldStatus.EXPOSED:
+                                val_str = str(fobs.raw_value or "").lower()
+                                if any(ident.lower() in val_str for ident in subject_identifiers):
+                                    subject_pii_present = True
+                                    break
+                            elif fobs.status == FieldStatus.UNREADABLE:
+                                subject_pii_present = True
+                                break
+                        if not subject_pii_present and observed_pii_exposed:
+                            for pd in pii_details:
+                                if any(ident.lower() in pd.lower() for ident in subject_identifiers):
+                                    subject_pii_present = True
+                                    break
+
+                        # Check raw content/facts for subject identifiers
+                        if not subject_pii_present:
+                            msg_text = str(combined_facts.get("body") or combined_facts.get("message") or combined_facts.get("text") or "").lower()
+                            if msg_text and any(ident.lower() in msg_text for ident in subject_identifiers):
+                                subject_pii_present = True
+
+                        if subject_pii_present:
+                            outcome = PolicyComplianceOutcome.VIOLATED
+                        else:
+                            # Verify positive proof of redaction if subject had PII
+                            is_redacted = (
+                                combined_facts.get("is_redacted") is True
+                                or combined_facts.get("redacted") is True
+                                or "[REDACTED]" in str(combined_facts)
+                                or any(f.status == FieldStatus.MASKED for f in copy_ast.fields.values())
+                            )
+                            # If no subject identifiers remain and no exposed PII
+                            outcome = PolicyComplianceOutcome.SATISFIED
                 else:
                     outcome = PolicyComplianceOutcome.UNDETERMINED
                     missing_facts.append(f"Existence state is {copy_ast.existence.value}")
@@ -260,18 +290,25 @@ class PolicyEvaluator:
         # -------------------------------------------------------------
         elif category == DataCategory.SUPPORT_ATTACHMENT:
             # Condition: Attachment belongs only to the deletion subject
-            is_shared = (
+            if combined_facts.get("belongs_only_to_subject") is True or combined_facts.get("sole_owner") is True:
+                belongs_only_to_subject = True
+            elif (
                 combined_facts.get("shared_with_others") is True
                 or combined_facts.get("multi_party") is True
                 or combined_facts.get("is_shared") is True
-            )
-            belongs_only_to_subject = (
-                combined_facts.get("belongs_only_to_subject") is True
-                or combined_facts.get("sole_owner") is True
-                or not is_shared
-            )
+                or combined_facts.get("belongs_only_to_subject") is False
+                or combined_facts.get("sole_owner") is False
+            ):
+                belongs_only_to_subject = False
+            else:
+                belongs_only_to_subject = None
 
-            if belongs_only_to_subject:
+            if belongs_only_to_subject is None:
+                condition_eval = ConditionEvaluation.UNKNOWN
+                condition_details = "Attachment ownership facts not supplied (unknown if exclusive or shared)."
+                outcome = PolicyComplianceOutcome.UNDETERMINED
+                missing_facts.append("Attachment ownership facts (exclusive vs shared) missing.")
+            elif belongs_only_to_subject is True:
                 condition_eval = ConditionEvaluation.TRUE
                 condition_details = "Attachment belongs exclusively to the deletion subject."
                 target_properties = {"existence": "ABSENT"}
@@ -299,10 +336,15 @@ class PolicyEvaluator:
                 combined_facts.get("anonymized") is True
                 or combined_facts.get("is_anonymized") is True
                 or "ANONYMIZED" in str(copy_ast.fields.get("anonymized_status", ""))
+                or any(str(f.raw_value or "").startswith("anon_") for f in copy_ast.fields.values())
             )
 
-            # Check if payload/fields still contain usable identifiers
+            # Check if stored payload/fields still contain usable identifiers
             has_identifying_payload = False
+            has_content_facts = bool(copy_ast.fields) or any(
+                k in combined_facts for k in ["payload", "record_json", "profile_data", "event_data", "user_id", "email"]
+            )
+
             for fname, fobs in copy_ast.fields.items():
                 if fobs.status == FieldStatus.EXPOSED:
                     val_str = str(fobs.raw_value or "").lower()
@@ -310,10 +352,17 @@ class PolicyEvaluator:
                         has_identifying_payload = True
                         break
 
-            # Check raw facts
-            facts_str = str(combined_facts).lower()
-            if any(ident.lower() in facts_str for ident in subject_identifiers):
-                has_identifying_payload = True
+            # Inspect stored payload fields specifically (not historical query context)
+            stored_payload = (
+                combined_facts.get("payload")
+                or combined_facts.get("record_json")
+                or combined_facts.get("profile_data")
+                or combined_facts.get("event_data")
+            )
+            if stored_payload and not has_identifying_payload:
+                stored_str = str(stored_payload).lower()
+                if any(ident.lower() in stored_str for ident in subject_identifiers):
+                    has_identifying_payload = True
 
             if has_identifying_payload:
                 condition_eval = ConditionEvaluation.TRUE
@@ -327,17 +376,27 @@ class PolicyEvaluator:
                     outcome = PolicyComplianceOutcome.SATISFIED
                 else:
                     outcome = PolicyComplianceOutcome.UNDETERMINED
+            elif is_anonymized_flag:
+                condition_eval = ConditionEvaluation.FALSE
+                condition_details = "Record is verified anonymized and no longer attributable to the user."
+                target_properties = {"anonymized": True, "attributable": False}
+                outcome = PolicyComplianceOutcome.SATISFIED
+            elif copy_ast.existence == ExistenceState.ABSENT:
+                condition_eval = ConditionEvaluation.FALSE
+                condition_details = "Record is absent."
+                target_properties = {"anonymized": True, "attributable": False}
+                outcome = PolicyComplianceOutcome.SATISFIED
+            elif copy_ast.existence == ExistenceState.PRESENT:
+                # Existing record without evidence of anonymization cannot be assumed compliant
+                condition_eval = ConditionEvaluation.UNKNOWN
+                condition_details = "Attribution facts inconclusive: record exists but proof of anonymization missing."
+                outcome = PolicyComplianceOutcome.UNDETERMINED
+                missing_facts.append("Positive proof of anonymization missing for existing analytics record.")
             else:
-                # No identifying subject payload present
-                if is_anonymized_flag or copy_ast.existence in {ExistenceState.ABSENT, ExistenceState.PRESENT}:
-                    condition_eval = ConditionEvaluation.FALSE
-                    condition_details = "Record is no longer attributable to the user (anonymized or absent)."
-                    target_properties = {"anonymized": True, "attributable": False}
-                    outcome = PolicyComplianceOutcome.SATISFIED
-                else:
-                    condition_eval = ConditionEvaluation.UNKNOWN
-                    condition_details = "Attribution facts inconclusive."
-                    outcome = PolicyComplianceOutcome.UNDETERMINED
+                condition_eval = ConditionEvaluation.UNKNOWN
+                condition_details = "Attribution facts inconclusive."
+                outcome = PolicyComplianceOutcome.UNDETERMINED
+                missing_facts.append(f"Existence state is {copy_ast.existence.value}")
 
         # -------------------------------------------------------------
         # 5. EMAIL_DELIVERY_LOG (REDACT)
@@ -445,7 +504,14 @@ class PolicyEvaluator:
             is_active = False
             if hold_status == "ACTIVE":
                 is_active = True
-                if hold_end:
+                if hold_start:
+                    try:
+                        start_dt = datetime.fromisoformat(str(hold_start).replace("Z", "+00:00"))
+                        if self.audit_at < start_dt:
+                            is_active = False
+                    except Exception:
+                        pass
+                if hold_end and is_active:
                     try:
                         end_dt = datetime.fromisoformat(str(hold_end).replace("Z", "+00:00"))
                         if self.audit_at > end_dt:
@@ -525,7 +591,31 @@ class PolicyEvaluator:
                 outcome = PolicyComplianceOutcome.VIOLATED
             elif copy_ast.existence == ExistenceState.PRESENT:
                 # Stable internal user_id is PERMITTED.
-                # Prohibited: name, email, phone, email_hash
+                # Must positively prove:
+                # 1. Stable reference is preserved (user_id/subject_id)
+                # 2. Prohibited direct identifiers (name, email, phone, email_hash) are removed/redacted
+                # Absence of fields/facts does NOT prove compliance!
+                has_stable_ref = False
+                for fname, fobs in copy_ast.fields.items():
+                    if fname.lower() in {"user_id", "subject_id", "id", "account_id"}:
+                        if (
+                            fobs.is_stable_ref
+                            or fobs.status == FieldStatus.RETAINED_STABLE_REF
+                            or (fobs.raw_value and (str(fobs.raw_value).startswith("user_") or str(fobs.raw_value).startswith("usr_")))
+                        ):
+                            has_stable_ref = True
+                            break
+                if not has_stable_ref:
+                    for k in ["user_id", "subject_id", "subject_reference"]:
+                        v = combined_facts.get(k)
+                        if v and (str(v).startswith("user_") or str(v).startswith("usr_")):
+                            has_stable_ref = True
+                            break
+
+                has_content_evidence = bool(copy_ast.fields) or any(
+                    k in combined_facts for k in ["user_id", "subject_id", "name", "email", "phone", "email_hash", "status", "record_json"]
+                )
+
                 prohibited_names = {"name", "email", "phone", "email_hash", "full_name"}
                 prohibited_exposed = any(
                     (fname.lower() in prohibited_names) and fobs.status == FieldStatus.EXPOSED
@@ -533,14 +623,16 @@ class PolicyEvaluator:
                     if fname.lower() not in {"user_id", "subject_id", "id", "account_id"}
                 )
                 if not prohibited_exposed:
-                    # Also check facts for exposed direct PII
                     for p in prohibited_names:
                         val = combined_facts.get(p)
                         if val and str(val) not in {"[REDACTED]", "***", "None"}:
                             prohibited_exposed = True
                             break
 
-                if prohibited_exposed:
+                if not has_content_evidence or not has_stable_ref:
+                    outcome = PolicyComplianceOutcome.UNDETERMINED
+                    missing_facts.append("Missing proof of preserved stable reference or content in tombstone.")
+                elif prohibited_exposed:
                     outcome = PolicyComplianceOutcome.VIOLATED
                 else:
                     outcome = PolicyComplianceOutcome.SATISFIED

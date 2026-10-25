@@ -133,6 +133,35 @@ class EvidenceLinker:
                 links.append(alias_link)
 
         # -------------------------------------------------------------
+        # Phase 1b: Primary Account Grounding via Activity/Evidence
+        # -------------------------------------------------------------
+        if user_id and user_id.startswith("user_"):
+            num_part = user_id[5:]
+            if num_part.isdigit():
+                cand_acc = f"account_{int(num_part):03d}"
+                cand_acts = self.index.get_activities_for_resource(system_id="account_service", resource_id=cand_acc, cutoff=audit_at)
+                cand_obs = self.index.get_observations_for_resource(system_id="account_service", resource_id=cand_acc, cutoff=audit_at)
+                if cand_acts or cand_obs:
+                    cand_key = ResourceKey(system_id="account_service", resource_id=cand_acc)
+                    cand_key_str = str(cand_key)
+                    if cand_key_str not in grounded_resources:
+                        grounded_resources[cand_key_str] = cand_key
+                        link = EvidenceLink(
+                            link_id=next_link_id(),
+                            from_endpoint=LinkEndpoint(endpoint_type="SUBJECT", endpoint_id=user_id),
+                            to_endpoint=LinkEndpoint(endpoint_type="RESOURCE", endpoint_id=cand_key_str),
+                            provenance=LinkProvenance(
+                                source_type="SYSTEM_ACTIVITY" if cand_acts else "EVIDENCE_OBSERVATION",
+                                source_id=cand_acts[0].activity_id if cand_acts else cand_obs[0].evidence_id,
+                                timestamp=cand_acts[0].event_time if cand_acts else cand_obs[0].capture_time,
+                                relationship=LinkRelationship.ACTIVITY_RESOURCE_MATCH if cand_acts else LinkRelationship.OBSERVATION_RESOURCE_CHAIN,
+                                is_direct=True,
+                            ),
+                            explanation=f"Subject {user_id} correlated with primary account {cand_acc} via verified activity/evidence",
+                        )
+                        links.append(link)
+
+        # -------------------------------------------------------------
         # Phase 2: Direct Identifier Matching in Eligible Observations
         # -------------------------------------------------------------
         for ident in subject_identifiers["all"]:

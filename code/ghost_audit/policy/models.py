@@ -39,7 +39,7 @@ class CopyPolicyAssessment(BaseModel):
     copy_type: str
     store_locator: Optional[str] = None
     data_category: Optional[DataCategory] = None
-    category_basis: str
+    category_basis: str = ""
     rule_id: Optional[str] = None
     required_action: Optional[RequiredAction] = None
     condition_evaluation: ConditionEvaluation = ConditionEvaluation.UNKNOWN
@@ -69,7 +69,7 @@ class ResourcePolicyAssessment(BaseModel):
     resource_id: str
     canonical_key: str
     data_category: Optional[DataCategory] = None
-    category_basis: str
+    category_basis: str = ""
     rule_id: Optional[str] = None
     required_action: Optional[RequiredAction] = None
     condition_evaluation: ConditionEvaluation = ConditionEvaluation.UNKNOWN
@@ -93,7 +93,7 @@ class ProcessRiskAssessment(BaseModel):
     system_id: str
     target_resource: Optional[str] = None
     target_copy: Optional[str] = None
-    risk_type: str  # ACTIVE_DATA_FLOW, STREAM_SYNC, UNVERIFIED_DISABLE
+    risk_type: str = "ACTIVE_DATA_FLOW"
     is_active: bool = False
     details: str = ""
     supporting_evidence: list[str] = Field(default_factory=list)
@@ -108,7 +108,7 @@ class RestoreRiskAssessment(BaseModel):
     system_id: str
     target_resource: Optional[str] = None
     target_copy: Optional[str] = None
-    risk_type: str  # RESTORE_ALLOWED, UNVERIFIED_BLOCK
+    risk_type: str = "RESTORE_ALLOWED"
     is_blocked: bool = False
     details: str = ""
     supporting_evidence: list[str] = Field(default_factory=list)

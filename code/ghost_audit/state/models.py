@@ -190,6 +190,51 @@ class ScopedAbsenceCheck(BaseModel):
         return parse_iso_timestamp(v)
 
 
+class ProcessObservation(BaseModel):
+    """Structured observation of a background process, stream, or connector."""
+
+    model_config = ConfigDict(frozen=True)
+
+    process_id: str
+    system_id: str
+    target_resource: Optional[str] = None
+    target_copy: Optional[str] = None
+    process_type: str = "DATA_FLOW"
+    state: ProcessState = ProcessState.UNKNOWN
+    is_claim: bool = False
+    claim_result: Optional[str] = None
+    evidence_id: str = ""
+    timestamp: datetime
+    details: str = ""
+
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def normalize_timestamp(cls, v: Any) -> datetime:
+        return parse_iso_timestamp(v)
+
+
+class RestoreObservation(BaseModel):
+    """Structured observation of a backup archive or restore permission path."""
+
+    model_config = ConfigDict(frozen=True)
+
+    backup_id: str
+    system_id: str
+    target_resource: Optional[str] = None
+    target_copy: Optional[str] = None
+    restore_state: RestoreState = RestoreState.UNKNOWN
+    is_claim: bool = False
+    claim_result: Optional[str] = None
+    evidence_id: str = ""
+    timestamp: datetime
+    details: str = ""
+
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def normalize_timestamp(cls, v: Any) -> datetime:
+        return parse_iso_timestamp(v)
+
+
 class StateDiagnostics(BaseModel):
     """Operational diagnostics and conflict records for state reconstruction."""
 
@@ -228,8 +273,10 @@ class CaseStateReconstruction(BaseModel):
     resources: dict[str, ResourceStateAggregate] = Field(default_factory=dict)
     active_processes: list[str] = Field(default_factory=list)
     restore_risks: list[str] = Field(default_factory=list)
+    process_observations: list[ProcessObservation] = Field(default_factory=list)
+    restore_observations: list[RestoreObservation] = Field(default_factory=list)
     scoped_absence_checks: list[ScopedAbsenceCheck] = Field(default_factory=list)
-    diagnostics: StateDiagnostics
+    diagnostics: Optional[StateDiagnostics] = None
 
     @field_validator("audit_at", mode="before")
     @classmethod
